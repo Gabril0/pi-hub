@@ -1,0 +1,54 @@
+{
+  "name": "pi-hub",
+  "version": "0.1.0",
+  "description": "Mission control for pi coding agents: diff review gate, agent dashboard, notifications, tests, tasks and PRs",
+  "type": "module",
+  "license": "MIT",
+  "author": "Gabril0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Gabril0/pi-hub.git"
+  },
+  "homepage": "https://github.com/Gabril0/pi-hub#readme",
+  "bugs": {
+    "url": "https://github.com/Gabril0/pi-hub/issues"
+  },
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "coding-agent",
+    "code-review",
+    "diff",
+    "agents",
+    "dashboard"
+  ],
+  "pi": {
+    "extensions": [
+      "./extension/index.ts"
+    ]
+  },
+  "bin": {
+    "pi-hub": "./hub/server.mjs"
+  },
+  "scripts": {
+    "hub": "node hub/server.mjs",
+    "test": "node --test test/*.test.mjs test/*.test.ts",
+    "typecheck": "tsc --noEmit -p .",
+    "smoke": "node scripts/cli-smoke.mjs"
+  },
+  "engines": {
+    "node": ">=20.6.0"
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-ai": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@mariozechner/pi-coding-agent": "^0.73.1",
+    "typescript": "^5.9.0",
+    "jiti": "^2.6.0",
+    "@types/node": "^24.0.0"
+  }
+}
