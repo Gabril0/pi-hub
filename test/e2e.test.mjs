@@ -9,6 +9,7 @@ process.env.PI_HUB_DIR = hubDir;
 process.env.PI_HUB_PORT = String(4900 + Math.floor(Math.random() * 500));
 process.env.PI_HUB_SILENT = "1";
 process.env.PI_HUB_SESSION_ID = "e2e-agent";
+process.env.PI_HUB_NO_AUTOSTART = "1";
 
 const { createHub } = await import("../hub/server.mjs");
 const { AuthStorage, ModelRegistry, SessionManager, DefaultResourceLoader, createAgentSession } = await import("@mariozechner/pi-coding-agent");
@@ -25,7 +26,7 @@ const seenToolResults = [];
 async function api(method, path, body) {
 	const res = await fetch(`http://127.0.0.1:${process.env.PI_HUB_PORT}${path}`, {
 		method,
-		headers: { "content-type": "application/json", "x-hub-token": hub.token },
+		headers: { "content-type": "application/json", "x-hub-token": hub.humanToken },
 		body: body ? JSON.stringify(body) : undefined,
 	});
 	return res.json();

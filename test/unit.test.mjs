@@ -104,5 +104,20 @@ test("hub survives malformed URLs and rejects cross-origin writes", async () => 
 	assert.equal(cross.status, 403);
 	const queryWrite = await fetch(`${base}/api/tasks?token=${hub.token}`, { method: "POST", body: "{}" });
 	assert.equal(queryWrite.status, 401);
+	const agent = { "x-hub-token": hub.token, "content-type": "application/json" };
+	const human = { "x-hub-token": hub.humanToken, "content-type": "application/json" };
+	await fetch(`${base}/api/sessions/register`, { method: "POST", headers: agent, body: JSON.stringify({ id: "s1", cwd: "/tmp" }) });
+	const review = await (await fetch(`${base}/api/reviews`, { method: "POST", headers: agent, body: JSON.stringify({ sessionId: "s1", tool: "write", path: "a.txt", absPath: "/tmp/a.txt", oldContent: "", newContent: "x" }) })).json();
+	const selfApprove = await fetch(`${base}/api/reviews/${review.id}/decision`, { method: "POST", headers: agent, body: JSON.stringify({ decision: "approve" }) });
+	assert.equal(selfApprove.status, 403);
+	for (const [path, body] of [["/api/sessions/s1/trust", { mode: "auto" }], ["/api/tests/run", { cwd: "/tmp", command: "echo pwned" }], ["/api/spawn", { cwd: "/tmp" }]]) {
+		assert.equal((await fetch(`${base}${path}`, { method: "POST", headers: agent, body: JSON.stringify(body) })).status, 403, path);
+	}
+	assert.equal((await fetch(`${base}/api/config`, { method: "PUT", headers: agent, body: "{}" })).status, 403);
+	assert.equal((await fetch(`${base}/api/state`, { headers: agent })).status, 403);
+	assert.equal((await fetch(`${base}/api/reviews/${review.id}/decision`, { method: "POST", headers: human, body: JSON.stringify({ decision: "approve" }) })).status, 200);
+	const { request } = await import("node:http");
+	const rebound = await new Promise((resolve) => request({ host: "127.0.0.1", port, path: "/api/health", headers: { host: "evil.example" } }, (res) => resolve(res.statusCode)).end());
+	assert.equal(rebound, 421);
 	await hub.close();
 });

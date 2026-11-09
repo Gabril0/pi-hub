@@ -160,8 +160,8 @@ export default function piHub(pi: ExtensionAPI) {
 		color = session.color;
 		trust = session.trust ?? "review";
 		try {
-			const state = await client.get("/api/state");
-			summaryConfig = state.config?.summaries ?? summaryConfig;
+			const agentConfig = await client.get("/api/agent-config");
+			summaryConfig = agentConfig.summaries ?? summaryConfig;
 		} catch {}
 		renderStatus();
 	}
@@ -464,7 +464,7 @@ export default function piHub(pi: ExtensionAPI) {
 		runFiles.add(proposal.absPath);
 		if (created.status === "approved") return;
 
-		if (ctx.hasUI) ctx.ui.notify(`Waiting for review: ${proposal.path} — ${client.browserUrl}#/review/${created.id}`, "info");
+		if (ctx.hasUI) ctx.ui.notify(`Waiting for review: ${proposal.path} (open the dashboard with /hub)`, "info");
 		const decision = await waitForDecision(created.id, { id: created.id, toolCallId: event.toolCallId, proposal, chat: [], latest: proposal.newContent, ctx }, ctx.signal);
 
 		if (decision.decision === "cancelled") return { block: true, reason: "The change was cancelled before review completed." };
@@ -627,10 +627,9 @@ export default function piHub(pi: ExtensionAPI) {
 
 	pi.registerCommand("hub", {
 		description: "Open the pi hub dashboard in the browser",
-		handler: async (_args, ctx) => {
+		handler: async (args, ctx) => {
 			if (!(await client.ready())) return ctx.ui.notify("pi hub is not reachable", "error");
-			const { openBrowser } = await import("../hub/terminal.mjs");
-			await openBrowser(client.browserUrl);
+			await client.post("/api/open-dashboard", { path: args.trim() ? `#/${args.trim()}` : "" });
 		},
 	});
 

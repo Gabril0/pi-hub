@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { appendFileSync, existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { extname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -70,9 +71,36 @@ function excerpt(text, max = 280) {
 	return value.length > max ? `${value.slice(0, max - 1)}…` : value;
 }
 
-export function createHub({ port = PORT, stateFile, silent = false, openBrowserFn = openBrowser, onShutdown } = {}) {
+export const AGENT_ROUTES = new Set([
+	"POST /api/sessions/register",
+	"GET /api/sessions/:id/channel",
+	"POST /api/sessions/:id/events",
+	"POST /api/sessions/:id/state",
+	"GET /api/agent-config",
+	"POST /api/open-dashboard",
+	"POST /api/reviews",
+	"GET /api/reviews/:id",
+	"POST /api/reviews/:id/chat",
+	"POST /api/reviews/:id/revision",
+	"POST /api/reviews/:id/cancel",
+	"POST /api/reviews/:id/applied",
+	"POST /api/changesets",
+	"POST /api/questions",
+	"GET /api/inbox/:id",
+	"POST /api/inbox/:id/resolve",
+	"GET /api/agents",
+	"POST /api/messages",
+	"GET /api/tasks",
+	"POST /api/tasks",
+	"PATCH /api/tasks/:id",
+	"POST /api/tests/ingest",
+	"POST /api/shutdown",
+]);
+
+export function createHub({ port = PORT, stateFile, silent = false, openBrowserFn = openBrowser, onShutdown, humanToken: fixedHumanToken } = {}) {
 	ensureHubDir();
 	const token = readToken();
+	const humanToken = fixedHumanToken ?? process.env.PI_HUB_HUMAN_TOKEN ?? randomBytes(24).toString("hex");
 	let config = loadConfig();
 	const store = new Store(stateFile);
 	const channels = new Map();
@@ -82,7 +110,7 @@ export function createHub({ port = PORT, stateFile, silent = false, openBrowserF
 	let lastBrowserOpen = 0;
 	let actualPort = port;
 
-	const baseUrl = () => `http://${HOST}:${actualPort}/?token=${token}`;
+	const baseUrl = () => `http://${HOST}:${actualPort}/?token=${humanToken}`;
 	const notify = silent ? () => {} : createNotifier(() => config, baseUrl);
 
 	function log(line) {
@@ -467,9 +495,17 @@ export function createHub({ port = PORT, stateFile, silent = false, openBrowserF
 		return JSON.parse(Buffer.concat(chunks).toString("utf8"));
 	}
 
-	function authorized(req, url) {
-		if (req.headers["x-hub-token"] === token) return true;
-		return req.method === "GET" && url.searchParams.get("token") === token;
+	function roleOf(req, url) {
+		const header = req.headers["x-hub-token"];
+		const query = req.method === "GET" ? url.searchParams.get("token") : null;
+		if (header === humanToken || query === humanToken) return "human";
+		if (header === token) return "agent";
+		return null;
+	}
+
+	function hostAllowed(req) {
+		const host = String(req.headers.host ?? "");
+		return host === `${HOST}:${actualPort}` || host === `localhost:${actualPort}`;
 	}
 
 	function sameOrigin(req) {
@@ -510,7 +546,7 @@ export function createHub({ port = PORT, stateFile, silent = false, openBrowserF
 	const route = (method, pattern, handler) => {
 		const keys = [];
 		const regex = new RegExp(`^${pattern.replace(/:(\w+)/g, (_, key) => (keys.push(key), "([^/]+)"))}$`);
-		routes.push({ method, regex, keys, handler });
+		routes.push({ method, regex, keys, handler, agent: AGENT_ROUTES.has(`${method} ${pattern}`) });
 	};
 
 	route("GET", "/api/health", () => ({ ok: true, version: HUB_VERSION, build: BUILD, pid: process.pid }));
@@ -527,6 +563,14 @@ export function createHub({ port = PORT, stateFile, silent = false, openBrowserF
 		browsers.add(res);
 		req.on("close", () => browsers.delete(res));
 		return null;
+	});
+
+	route("GET", "/api/agent-config", () => ({ summaries: config.summaries, review: { contextLines: config.review.contextLines } }));
+
+	route("POST", "/api/open-dashboard", ({ body }) => {
+		lastBrowserOpen = Date.now();
+		openBrowserFn(`${baseUrl()}${typeof body.path === "string" && body.path.startsWith("#/") ? body.path : ""}`);
+		return { ok: true };
 	});
 
 	route("PUT", "/api/config", ({ body }) => {
@@ -823,11 +867,14 @@ export function createHub({ port = PORT, stateFile, silent = false, openBrowserF
 	const server = createServer(async (req, res) => {
 		try {
 			const url = new URL(req.url ?? "/", `http://${HOST}`);
+			if (!hostAllowed(req)) return json(res, 421, { error: "unexpected host" });
 			if (!url.pathname.startsWith("/api/")) return serveStatic(req, res, url);
-			if (url.pathname !== "/api/health" && !authorized(req, url)) return json(res, 401, { error: "unauthorized" });
+			const role = url.pathname === "/api/health" ? "public" : roleOf(req, url);
+			if (!role) return json(res, 401, { error: "unauthorized" });
 			if (req.method !== "GET" && !sameOrigin(req)) return json(res, 403, { error: "cross-origin request rejected" });
 			const match = routes.find((r) => r.method === req.method && r.regex.test(url.pathname));
 			if (!match) return json(res, 404, { error: "no route" });
+			if (role === "agent" && !match.agent) return json(res, 403, { error: "this action needs the human dashboard token" });
 			const values = url.pathname.match(match.regex).slice(1);
 			const params = Object.fromEntries(match.keys.map((key, i) => [key, decodeURIComponent(values[i])]));
 			const body = ["POST", "PUT", "PATCH"].includes(req.method) ? await readBody(req) : {};
@@ -887,7 +934,7 @@ export function createHub({ port = PORT, stateFile, silent = false, openBrowserF
 		return new Promise((done) => server.close(() => done()));
 	}
 
-	return { listen, close, store, token, url: baseUrl, get port() {
+	return { listen, close, store, token, humanToken, url: baseUrl, get port() {
 		return actualPort;
 	} };
 }

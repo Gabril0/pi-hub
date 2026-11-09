@@ -18,8 +18,9 @@ const work = join(sandbox, "work");
 for (const dir of [hubDir, agentDir, work]) mkdirSync(dir, { recursive: true });
 writeFileSync(join(work, "app.py"), 'def greet(name):\n    return "hi " + name\n');
 
+const humanToken = `smoke-${Math.random().toString(36).slice(2)}`;
 const port = String(4900 + Math.floor(Math.random() * 400));
-const env = { ...process.env, PI_CODING_AGENT_DIR: agentDir, PI_HUB_DIR: hubDir, PI_HUB_PORT: port, PI_HUB_SILENT: "1", PI_HUB_SESSION_ID: "cli-smoke" };
+const env = { ...process.env, PI_CODING_AGENT_DIR: agentDir, PI_HUB_DIR: hubDir, PI_HUB_PORT: port, PI_HUB_SILENT: "1", PI_HUB_SESSION_ID: "cli-smoke", PI_HUB_HUMAN_TOKEN: humanToken };
 const pi = spawn(process.execPath, [cli, "-e", join(root, "extension", "index.ts"), "-e", join(root, "test", "fixtures", "scripted-model.ts"), "--model", "scripted/scripted-1", "-p", "change the greeting"], { cwd: work, env, stdio: ["ignore", "pipe", "pipe"] });
 let output = "";
 pi.stdout.on("data", (chunk) => (output += chunk));
@@ -27,7 +28,7 @@ pi.stderr.on("data", (chunk) => (output += chunk));
 const exited = new Promise((resolve) => pi.on("close", resolve));
 
 const base = `http://127.0.0.1:${port}`;
-const token = () => (existsSync(join(hubDir, "token")) ? readFileSync(join(hubDir, "token"), "utf8").trim() : "");
+const token = () => humanToken;
 const api = async (method, path, body) => {
 	const res = await fetch(`${base}${path}`, { method, headers: { "content-type": "application/json", "x-hub-token": token() }, body: body ? JSON.stringify(body) : undefined });
 	return res.json();

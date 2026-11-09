@@ -43,9 +43,6 @@ export class HubClient {
 		return HUB_BASE;
 	}
 
-	get browserUrl() {
-		return `${HUB_BASE}/?token=${this.token}`;
-	}
 
 	private loadToken() {
 		const file = join(HUB_DIR, "token");
@@ -79,6 +76,7 @@ export class HubClient {
 	}
 
 	private startServer() {
+		if (process.env.PI_HUB_NO_AUTOSTART === "1") return;
 		mkdirSync(HUB_DIR, { recursive: true });
 		const log = openSync(join(HUB_DIR, "hub.stdout.log"), "a");
 		const child = spawn(nodeExecutable(), [SERVER_SCRIPT], {
