@@ -217,31 +217,31 @@ table.diff.side-by-side td.code.left {
 
 table.diff tr.del td.code,
 table.diff td.code.del {
-	background: #5a1b22;
+	background: #3a1d24;
 }
 table.diff tr.del td.num,
 table.diff td.num.del {
-	color: #fff;
-	background: #8a2430;
+	color: #ffd7da;
+	background: #6b2630;
 }
 table.diff tr.del td.sign,
 table.diff td.sign.del {
 	color: #ff8e95;
-	background: #5a1b22;
+	background: #3a1d24;
 }
 table.diff tr.add td.code,
 table.diff td.code.add {
-	background: #1d5530;
+	background: #17362a;
 }
 table.diff tr.add td.num,
 table.diff td.num.add {
-	color: #fff;
-	background: #2a7f45;
+	color: #d3f7dd;
+	background: #22593a;
 }
 table.diff tr.add td.sign,
 table.diff td.sign.add {
 	color: #7ee2a0;
-	background: #1d5530;
+	background: #17362a;
 }
 table.diff td.code.empty {
 	background: #16191f;
@@ -249,25 +249,19 @@ table.diff td.code.empty {
 mark.wd {
 	padding: 0;
 	color: inherit;
-	border-radius: 2px;
+	border-radius: 3px;
 	-webkit-box-decoration-break: clone;
 	box-decoration-break: clone;
 }
 td.del mark.wd,
 tr.del mark.wd {
-	color: #fff;
-	background: #e5303f;
+	background: rgba(248, 81, 73, 0.42);
+	box-shadow: 0 0 0 1px rgba(248, 81, 73, 0.25);
 }
 td.add mark.wd,
 tr.add mark.wd {
-	color: #f2fff5;
-	background: #2fb457;
-}
-td.del mark.wd span,
-td.add mark.wd span,
-tr.del mark.wd span,
-tr.add mark.wd span {
-	color: inherit !important;
+	background: rgba(63, 185, 80, 0.42);
+	box-shadow: 0 0 0 1px rgba(63, 185, 80, 0.25);
 }
 
 table.side-by-side tr.rejected td.l {
@@ -701,18 +695,6 @@ tr.block-head td > .row {
 	color: #b9d0ff;
 	background: rgba(255, 255, 255, 0.08);
 	box-shadow: none;
-}
-table.diff td.code.del,
-table.diff td.code.add,
-table.diff tr.del td.code,
-table.diff tr.add td.code {
-	color: #f6eef0;
-}
-table.diff td.code.del span,
-table.diff td.code.add span,
-table.diff tr.del td.code span,
-table.diff tr.add td.code span {
-	color: inherit !important;
 }
 
 @media (max-width: 1180px) {
