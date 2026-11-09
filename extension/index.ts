@@ -3,7 +3,7 @@ import { hostname } from "node:os";
 import { basename } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { Type } from "typebox";
-import { buildProposal, diffStats, type Proposal, rewriteInputForContent } from "./edits";
+import { buildProposal, changedSinceProposal, diffStats, type Proposal, rewriteInputForContent } from "./edits";
 import { type ChannelMessage, HubClient } from "./hub-client";
 import { answerReviewQuestion, formatLineComments, type LineComment, reviseProposal, summarizeSession } from "./llm";
 import { isTestCommand } from "../hub/test-parsers.mjs";
@@ -93,11 +93,22 @@ export function formatDenial(path: string, decision: ReviewDecision): string {
 	return lines.join("\n");
 }
 
+export function formatApprovalNotes(path: string, decision: ReviewDecision, modified: boolean): string | undefined {
+	const parts: string[] = [];
+	if (modified) parts.push(`The reviewer approved ${path} with modifications (some hunks excluded or edited), so the file on disk differs from your proposal. Re-read it before editing it again.`);
+	if (decision.comment?.trim()) parts.push(`Reviewer note: ${decision.comment.trim()}`);
+	const comments = formatLineComments(decision.lineComments);
+	if (comments) parts.push(`Line comments:\n${comments}`);
+	if (!parts.length) return undefined;
+	return `[pi hub review]\n${parts.join("\n")}`;
+}
+
 export default function piHub(pi: ExtensionAPI) {
 	const id = sessionKey();
 	const pendingReviews = new Map<string, PendingReview>();
 	const pendingQuestions = new Map<string, PendingQuestion>();
 	const reviewByToolCall = new Map<string, string>();
+	const approvalNotes = new Map<string, string>();
 	let latestCtx: ExtensionContext | undefined;
 	let gateEnabled = process.env.PI_HUB_GATE !== "0";
 	let trust: "review" | "auto" = "review";
@@ -472,22 +483,37 @@ export default function piHub(pi: ExtensionAPI) {
 			runFiles.delete(proposal.absPath);
 			return { block: true, reason: formatDenial(proposal.path, decision) };
 		}
-		if (proposal.snippetOnly) return undefined;
-		const finalContent = decision.content ?? proposal.newContent;
+		if (changedSinceProposal(proposal)) {
+			runFiles.delete(proposal.absPath);
+			void client.post(`/api/reviews/${created.id}/applied`, { ok: false, error: "The file changed on disk while this review was open, so nothing was written." }).catch(() => {});
+			reviewByToolCall.delete(event.toolCallId);
+			return {
+				block: true,
+				reason: `${proposal.path} changed on disk while your change was waiting for review (the user or another agent edited it), so nothing was written. Re-read the file and propose the change again against its current content.`,
+			};
+		}
+		const finalContent = proposal.snippetOnly ? proposal.newContent : decision.content ?? proposal.newContent;
+		const modified = !proposal.snippetOnly && finalContent !== proposal.newContent;
 		if (proposal.tool === "edit" && finalContent === proposal.editBase) {
 			runFiles.delete(proposal.absPath);
 			return { block: true, reason: `The reviewer approved ${proposal.path} with every hunk excluded, so the file was left unchanged. Do not retry this change.` };
 		}
-		if (finalContent !== proposal.newContent) rewriteInputForContent(proposal, event.input, finalContent);
+		if (modified) rewriteInputForContent(proposal, event.input, finalContent);
+		const notes = formatApprovalNotes(proposal.path, decision, modified);
+		if (notes) approvalNotes.set(event.toolCallId, notes);
 		return undefined;
 	});
 
 	pi.on("tool_result", async (event, ctx) => {
 		latestCtx = ctx;
 		const reviewId = reviewByToolCall.get(event.toolCallId);
+		let patched: { content: any[] } | undefined;
 		if (reviewId) {
 			reviewByToolCall.delete(event.toolCallId);
 			void client.post(`/api/reviews/${reviewId}/applied`, { ok: !event.isError, error: event.isError ? textOf(event.content).slice(0, 500) : undefined }).catch(() => {});
+			const notes = approvalNotes.get(event.toolCallId);
+			approvalNotes.delete(event.toolCallId);
+			if (notes && !event.isError) patched = { content: [...(event.content ?? []), { type: "text", text: notes }] };
 		}
 		if (event.toolName === "bash" && isTestCommand((event.input as any)?.command)) {
 			const output = textOf(event.content);
@@ -495,6 +521,7 @@ export default function piHub(pi: ExtensionAPI) {
 			const exitCode = commandExit ? Number(commandExit[1]) : event.isError ? 1 : 0;
 			void client.post("/api/tests/ingest", { sessionId: id, cwd: ctx.cwd, command: (event.input as any).command, output, exitCode }).catch(() => {});
 		}
+		return patched;
 	});
 
 	pi.registerTool({

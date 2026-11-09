@@ -16,6 +16,7 @@ export interface Proposal {
 	newContent: string;
 	editBase?: string;
 	snippetOnly?: boolean;
+	rawBefore: string | null;
 }
 
 export function normalizeToLF(text: string): string {
@@ -101,7 +102,7 @@ export function buildProposal(toolName: string, input: any, cwd: string): Propos
 	}
 	if (toolName === "write") {
 		if (typeof input.content !== "string") return undefined;
-		return { tool: "write", path: input.path, absPath, isNew: !exists, oldContent: raw, newContent: input.content };
+		return { tool: "write", path: input.path, absPath, isNew: !exists, oldContent: raw, newContent: input.content, rawBefore: exists ? raw : null };
 	}
 	const edits = normalizeEditInput(input);
 	if (!exists || !edits.length) return undefined;
@@ -116,9 +117,20 @@ export function buildProposal(toolName: string, input: any, cwd: string): Propos
 			oldContent: edits.map((e) => normalizeToLF(e.oldText)).join("\n⋯\n"),
 			newContent: edits.map((e) => normalizeToLF(e.newText)).join("\n⋯\n"),
 			snippetOnly: true,
+			rawBefore: raw,
 		};
 	}
-	return { tool: "edit", path: input.path, absPath, isNew: false, oldContent: editBase, newContent, editBase };
+	return { tool: "edit", path: input.path, absPath, isNew: false, oldContent: editBase, newContent, editBase, rawBefore: raw };
+}
+
+export function changedSinceProposal(proposal: Proposal): boolean {
+	let current: string | null = null;
+	try {
+		current = existsSync(proposal.absPath) ? readFileSync(proposal.absPath, "utf8") : null;
+	} catch {
+		return true;
+	}
+	return current !== proposal.rawBefore;
 }
 
 export function rewriteInputForContent(proposal: Proposal, input: any, content: string): void {
