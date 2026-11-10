@@ -24,6 +24,7 @@ export const DEFAULT_CONFIG = {
 			test_fail: true,
 			pr: true,
 			conflict: true,
+			changeset: true,
 		},
 	},
 	review: {

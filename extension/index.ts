@@ -5,6 +5,7 @@ import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-age
 import { Type } from "typebox";
 import { buildProposal, changedSinceProposal, diffStats, type Proposal, rewriteInputForContent } from "./edits";
 import { type ChannelMessage, HubClient } from "./hub-client";
+import { diffSnapshots, isReadOnlyCommand, type Snapshot, takeSnapshot } from "./snapshot";
 import { answerReviewQuestion, formatLineComments, type LineComment, reviseProposal, summarizeSession } from "./llm";
 import { isTestCommand } from "../hub/test-parsers.mjs";
 
@@ -112,6 +113,9 @@ export default function piHub(pi: ExtensionAPI) {
 	let latestCtx: ExtensionContext | undefined;
 	let gateEnabled = process.env.PI_HUB_GATE !== "0";
 	let trust: "review" | "auto" = "review";
+	let reviewMode: "gate" | "checkpoint" = process.env.PI_HUB_MODE === "checkpoint" ? "checkpoint" : "gate";
+	const bashSnapshots = new Map<string, Promise<Snapshot | undefined>>();
+	let turnSnapshot: Promise<Snapshot | undefined> | undefined;
 	let color: { name: string; hex: string } | undefined;
 	let lastPrompt = "";
 	let runFiles = new Set<string>();
@@ -154,7 +158,7 @@ export default function piHub(pi: ExtensionAPI) {
 	function renderFooter(ctx: ExtensionContext) {
 		const dot = color ? `${hexToAnsi(color.hex)}●\x1b[0m` : "○";
 		const pending = pendingReviews.size ? ` · ${pendingReviews.size} review${pendingReviews.size > 1 ? "s" : ""} pending` : "";
-		const mode = !gateEnabled ? " · gate off" : trust === "auto" ? " · auto-approve" : "";
+		const mode = !gateEnabled ? " · gate off" : trust === "auto" ? " · auto-approve" : reviewMode === "checkpoint" ? " · checkpoint" : "";
 		const link = client.connected ? "" : " · offline";
 		ctx.ui.setStatus("pi-hub", `${dot} hub ${color?.name ?? ""}${mode}${pending}${link}`);
 	}
@@ -170,6 +174,7 @@ export default function piHub(pi: ExtensionAPI) {
 		const { session } = await client.post("/api/sessions/register", info);
 		color = session.color;
 		trust = session.trust ?? "review";
+		if (session.reviewMode === "checkpoint" || session.reviewMode === "gate") reviewMode = session.reviewMode;
 		try {
 			const agentConfig = await client.get("/api/agent-config");
 			summaryConfig = agentConfig.summaries ?? summaryConfig;
@@ -337,6 +342,13 @@ export default function piHub(pi: ExtensionAPI) {
 			case "config":
 				summaryConfig = message.config?.summaries ?? summaryConfig;
 				break;
+			case "review_feedback":
+				deliverHubNote(message.text);
+				break;
+			case "mode":
+				reviewMode = message.mode === "checkpoint" ? "checkpoint" : "gate";
+				renderStatus();
+				break;
 			case "rename":
 				pi.setSessionName(message.name);
 				break;
@@ -402,6 +414,7 @@ export default function piHub(pi: ExtensionAPI) {
 		runFiles = new Set();
 		runTurns = 0;
 		client.event({ kind: "agent_start", prompt: lastPrompt });
+		turnSnapshot = gateEnabled && reviewMode === "checkpoint" ? Promise.resolve(await takeSnapshot(ctx.cwd).catch(() => undefined)) : undefined;
 	});
 
 	pi.on("turn_end", async (_event, ctx) => {
@@ -441,14 +454,52 @@ export default function piHub(pi: ExtensionAPI) {
 		const error = lastAssistant?.stopReason === "error" ? lastAssistant.errorMessage ?? "error" : lastAssistant?.stopReason === "aborted" ? "aborted" : undefined;
 		client.event({ kind: "agent_end", text: textOf(lastAssistant?.content), error, files: [...runFiles] });
 		await client.flush();
+		if (turnSnapshot) {
+			const before = await turnSnapshot;
+			turnSnapshot = undefined;
+			await reportChanges(before, cwd, "turn", lastPrompt);
+		}
 		if (summaryConfig.onAgentEnd && runTurns >= (summaryConfig.minTurns ?? 3) && !error) void runSummary();
 		const branch = await git(cwd, ["rev-parse", "--abbrev-ref", "HEAD"]);
 		if (branch) void client.post(`/api/sessions/${encodeURIComponent(id)}/state`, { branch }).catch(() => {});
 	});
 
+	async function reportChanges(before: Snapshot | undefined, cwd: string, kind: "bash" | "turn", title: string, afterSnapshot?: Snapshot) {
+		if (!before) return;
+		try {
+			const after = afterSnapshot ?? (await takeSnapshot(cwd));
+			if (!after) return;
+			const files = await diffSnapshots(before, after);
+			if (files.length) await client.post("/api/changesets", { sessionId: id, kind, title, root: before.root, files });
+		} catch {}
+	}
+
+	function currentIntent(ctx: ExtensionContext): string | undefined {
+		try {
+			const entries: any[] = ctx.sessionManager.getBranch();
+			for (let i = entries.length - 1; i >= 0; i--) {
+				const message = entries[i]?.message;
+				if (entries[i]?.type === "message" && message?.role === "assistant") {
+					const text = textOf(message.content).trim();
+					if (text) return text.slice(0, 600);
+				}
+				if (entries[i]?.type === "message" && message?.role === "user") return undefined;
+			}
+		} catch {}
+		return undefined;
+	}
+
 	pi.on("tool_call", async (event, ctx) => {
 		latestCtx = ctx;
-		if (!gateEnabled || (event.toolName !== "edit" && event.toolName !== "write")) return;
+		if (gateEnabled && reviewMode === "gate" && event.toolName === "bash") {
+			const command = String((event.input as any)?.command ?? "");
+			if (!isReadOnlyCommand(command)) {
+				const before = await takeSnapshot(ctx.cwd).catch(() => undefined);
+				bashSnapshots.set(event.toolCallId, Promise.resolve(before));
+			}
+			return;
+		}
+		if (!gateEnabled || reviewMode === "checkpoint" || (event.toolName !== "edit" && event.toolName !== "write")) return;
 		const proposal = buildProposal(event.toolName, event.input, ctx.cwd);
 		if (!proposal) return;
 		if (proposal.oldContent === proposal.newContent && !proposal.isNew) return;
@@ -466,6 +517,7 @@ export default function piHub(pi: ExtensionAPI) {
 				oldContent: proposal.oldContent,
 				newContent: proposal.newContent,
 				snippetOnly: proposal.snippetOnly,
+				intent: currentIntent(ctx),
 				reason: proposal.snippetOnly ? "Preview shows only the edited snippets: the full result could not be computed ahead of time." : undefined,
 			});
 		} catch {
@@ -514,6 +566,13 @@ export default function piHub(pi: ExtensionAPI) {
 			const notes = approvalNotes.get(event.toolCallId);
 			approvalNotes.delete(event.toolCallId);
 			if (notes && !event.isError) patched = { content: [...(event.content ?? []), { type: "text", text: notes }] };
+		}
+		const bashBefore = bashSnapshots.get(event.toolCallId);
+		if (bashBefore) {
+			bashSnapshots.delete(event.toolCallId);
+			const before = await bashBefore;
+			const after = before ? await takeSnapshot(ctx.cwd).catch(() => undefined) : undefined;
+			if (before && after) void reportChanges(before, ctx.cwd, "bash", String((event.input as any)?.command ?? ""), after);
 		}
 		if (event.toolName === "bash" && isTestCommand((event.input as any)?.command)) {
 			const output = textOf(event.content);
@@ -666,6 +725,16 @@ export default function piHub(pi: ExtensionAPI) {
 			gateEnabled = args.trim() === "" ? !gateEnabled : args.trim() !== "off";
 			renderStatus();
 			ctx.ui.notify(`Review gate ${gateEnabled ? "on" : "off"}`, "info");
+		},
+	});
+
+	pi.registerCommand("hub-mode", {
+		description: "Review style: /hub-mode gate (approve each edit) or /hub-mode checkpoint (review each turn as one changeset)",
+		handler: async (args, ctx) => {
+			reviewMode = args.trim() === "checkpoint" ? "checkpoint" : "gate";
+			await client.post(`/api/sessions/${encodeURIComponent(id)}/state`, { reviewMode }).catch(() => {});
+			renderStatus();
+			ctx.ui.notify(`Review mode: ${reviewMode}`, "info");
 		},
 	});
 

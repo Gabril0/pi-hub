@@ -1,8 +1,8 @@
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { appendFileSync, existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
-import { extname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildId } from "./build.mjs";
 import { pickColor } from "./colors.mjs";
@@ -31,6 +31,32 @@ const MIME = {
 };
 const OFFLINE_GRACE_MS = 8000;
 const BODY_LIMIT = 64 * 1024 * 1024;
+
+export function lineStats(before, after) {
+	const a = String(before ?? "").split("\n");
+	const b = String(after ?? "").split("\n");
+	if (!before) return { added: after ? b.length - (b.at(-1) === "" ? 1 : 0) : 0, removed: 0 };
+	if (!after) return { added: 0, removed: a.length - (a.at(-1) === "" ? 1 : 0) };
+	let start = 0;
+	while (start < a.length && start < b.length && a[start] === b[start]) start++;
+	let endA = a.length;
+	let endB = b.length;
+	while (endA > start && endB > start && a[endA - 1] === b[endB - 1]) {
+		endA--;
+		endB--;
+	}
+	const midA = a.slice(start, endA);
+	const midB = b.slice(start, endB);
+	if (midA.length * midB.length > 2_000_000) return { added: midB.length, removed: midA.length };
+	const prev = new Uint32Array(midB.length + 1);
+	const cur = new Uint32Array(midB.length + 1);
+	for (let i = 1; i <= midA.length; i++) {
+		for (let j = 1; j <= midB.length; j++) cur[j] = midA[i - 1] === midB[j - 1] ? prev[j - 1] + 1 : Math.max(prev[j], cur[j - 1]);
+		prev.set(cur);
+	}
+	const common = prev[midB.length];
+	return { added: midB.length - common, removed: midA.length - common };
+}
 
 export function globToRegExp(glob) {
 	let out = "";
@@ -180,7 +206,15 @@ export function createHub({ port = PORT, stateFile, silent = false, openBrowserF
 		);
 	}
 
-	function registerSession(body) {
+	const REGISTER_FIELDS = ["id", "name", "cwd", "repo", "repoRoot", "isGitRepo", "branch", "pid", "host", "platform", "tmuxPane", "tmuxSocket", "termProgram", "model", "sessionFile", "piSessionId", "reviewMode"];
+	const STATE_FIELDS = ["context", "model", "branch", "reviewMode", "name"];
+
+	function pick(source, keys) {
+		return Object.fromEntries(keys.filter((key) => source?.[key] !== undefined).map((key) => [key, source[key]]));
+	}
+
+	function registerSession(rawBody) {
+		const body = pick(rawBody, REGISTER_FIELDS);
 		const sessions = store.all("sessions");
 		const previous = store.get("sessions", body.id);
 		const color = pickColor(sessions, body.id);
@@ -326,6 +360,9 @@ export function createHub({ port = PORT, stateFile, silent = false, openBrowserF
 			isNew: Boolean(body.isNew),
 			snippetOnly: Boolean(body.snippetOnly),
 			oldContent: body.oldContent ?? "",
+			stats: lineStats(body.oldContent ?? "", body.newContent ?? ""),
+			intent: excerpt(body.intent ?? session?.lastMessage ?? "", 600),
+			step: (session?.progress?.steps ?? []).find((step) => step.status === "active")?.title,
 			revisions: [{ n: 1, content: body.newContent ?? "", note: "proposed by agent", by: "agent", at: Date.now() }],
 			chat: [],
 			conflicts,
@@ -608,8 +645,7 @@ export function createHub({ port = PORT, stateFile, silent = false, openBrowserF
 	});
 
 	route("POST", "/api/sessions/:id/state", ({ body, params }) => {
-		const { id: _ignored, color: _color, ...fields } = body;
-		const session = store.patch("sessions", params.id, { ...fields, lastSeen: Date.now() });
+		const session = store.patch("sessions", params.id, { ...pick(body, STATE_FIELDS), lastSeen: Date.now() });
 		return session ? { session } : [404, { error: "unknown session" }];
 	});
 
@@ -659,6 +695,11 @@ export function createHub({ port = PORT, stateFile, silent = false, openBrowserF
 	route("POST", "/api/sessions/:id/trust", ({ params, body }) => {
 		const session = store.patch("sessions", params.id, { trust: body.mode === "auto" ? "auto" : "review" });
 		if (session) sendToSession(params.id, { type: "trust", mode: session.trust });
+		return { session };
+	});
+	route("POST", "/api/sessions/:id/mode", ({ params, body }) => {
+		const session = store.patch("sessions", params.id, { reviewMode: body.mode === "checkpoint" ? "checkpoint" : "gate" });
+		if (session) sendToSession(params.id, { type: "mode", mode: session.reviewMode });
 		return { session };
 	});
 	route("POST", "/api/sessions/:id/focus", async ({ params }) => {
@@ -730,6 +771,80 @@ export function createHub({ port = PORT, stateFile, silent = false, openBrowserF
 	route("POST", "/api/reviews/:id/applied", ({ params, body }) => {
 		const review = store.patch("reviews", params.id, { applied: body.ok !== false, applyError: body.error });
 		return review ? { ok: true } : [404, { error: "review not found" }];
+	});
+
+	route("POST", "/api/changesets", ({ body }) => {
+		const files = (body.files ?? []).filter((f) => f && typeof f.path === "string");
+		if (!files.length) return { id: null };
+		const session = store.get("sessions", body.sessionId);
+		const stats = files.reduce(
+			(acc, f) => {
+				const s = lineStats(f.before ?? "", f.after ?? "");
+				return { added: acc.added + s.added, removed: acc.removed + s.removed };
+			},
+			{ added: 0, removed: 0 },
+		);
+		const changeset = store.upsert("changesets", {
+			id: newId("cs"),
+			sessionId: body.sessionId,
+			kind: body.kind === "turn" ? "turn" : "bash",
+			title: excerpt(body.title ?? "", 200),
+			root: body.root,
+			files: files.map((f) => ({ ...f, absPath: join(body.root ?? session?.cwd ?? "", f.path) })),
+			stats,
+			status: "open",
+			createdAt: Date.now(),
+		});
+		for (const f of changeset.files) touchFile(body.sessionId, f.absPath);
+		const label = changeset.kind === "turn" ? "Turn changes" : "Changes made by bash";
+		addInbox({ kind: "changeset", sessionId: body.sessionId, refId: changeset.id, title: `${label}: ${files.length} file${files.length === 1 ? "" : "s"} (+${stats.added} −${stats.removed})`, body: changeset.title, path: `#/changeset/${changeset.id}` });
+		store.appendEvent(body.sessionId, { kind: "changeset", text: `${label}: ${files.map((f) => f.path).slice(0, 6).join(", ")}`, changesetId: changeset.id });
+		return { id: changeset.id };
+	});
+	route("GET", "/api/changesets/:id", ({ params }) => {
+		const changeset = store.get("changesets", params.id);
+		return changeset ? { changeset } : [404, { error: "changeset not found" }];
+	});
+	route("POST", "/api/changesets/:id/resolve", ({ params, body }) => {
+		const changeset = store.get("changesets", params.id);
+		if (!changeset) return [404, { error: "changeset not found" }];
+		if (changeset.status !== "open") return [409, { error: `changeset is ${changeset.status}` }];
+		const outcomes = [];
+		for (const change of body.files ?? []) {
+			const file = changeset.files.find((f) => f.path === change.path);
+			if (!file || file.binary || file.tooLarge) continue;
+			let current = null;
+			try {
+				current = existsSync(file.absPath) ? readFileSync(file.absPath, "utf8") : null;
+			} catch {}
+			if (current !== file.after) {
+				outcomes.push({ path: file.path, result: "skipped: changed again since the snapshot" });
+				continue;
+			}
+			try {
+				if (change.content === null) {
+					if (existsSync(file.absPath)) unlinkSync(file.absPath);
+				} else {
+					mkdirSync(dirname(file.absPath), { recursive: true });
+					writeFileSync(file.absPath, change.content);
+				}
+				outcomes.push({ path: file.path, result: change.content === file.before ? "reverted" : "partially reverted" });
+			} catch (error) {
+				outcomes.push({ path: file.path, result: `failed: ${error.message}` });
+			}
+		}
+		const reverted = outcomes.filter((o) => o.result.endsWith("reverted"));
+		const status = reverted.length ? (reverted.length === changeset.files.length && reverted.every((o) => o.result === "reverted") ? "reverted" : "partial") : "accepted";
+		store.patch("changesets", params.id, { status, outcomes, comment: body.comment, decidedAt: Date.now() });
+		resolveInbox((item) => item.refId === params.id && item.kind === "changeset", { outcome: status });
+		const lines = [];
+		if (reverted.length) lines.push(`The reviewer reverted changes in: ${reverted.map((o) => `${o.path} (${o.result})`).join(", ")}. Re-read those files before editing them again.`);
+		const skipped = outcomes.filter((o) => o.result.startsWith("skipped") || o.result.startsWith("failed"));
+		if (skipped.length) lines.push(`Could not revert: ${skipped.map((o) => `${o.path} (${o.result})`).join(", ")}.`);
+		if (body.comment?.trim()) lines.push(`Reviewer note: ${body.comment.trim()}`);
+		const delivered = lines.length ? sendToSession(changeset.sessionId, { type: "review_feedback", text: `[pi hub] ${changeset.kind === "turn" ? "Turn" : "Bash"} changes reviewed.\n${lines.join("\n")}` }) : false;
+		store.appendEvent(changeset.sessionId, { kind: "changeset", text: `changes ${status}${reverted.length ? `: ${reverted.map((o) => o.path).join(", ")}` : ""}`, changesetId: changeset.id });
+		return { status, outcomes, delivered };
 	});
 
 	route("POST", "/api/questions", ({ body }) => {

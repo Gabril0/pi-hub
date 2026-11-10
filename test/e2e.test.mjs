@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
@@ -16,6 +17,7 @@ const { AuthStorage, ModelRegistry, SessionManager, DefaultResourceLoader, creat
 const { registerFauxProvider, fauxAssistantMessage, fauxToolCall, fauxText } = await import("@mariozechner/pi-ai");
 
 const workdir = mkdtempSync(join(tmpdir(), "pi-hub-work-"));
+for (const args of [["init", "-q"], ["config", "user.email", "e2e@example.com"], ["config", "user.name", "e2e"], ["commit", "-q", "--allow-empty", "-m", "init"]]) execFileSync("git", args, { cwd: workdir });
 const file = join(workdir, "notes.txt");
 let hub;
 let session;
@@ -209,4 +211,34 @@ test("a file changed while its review is open is not overwritten", async () => {
 	await run;
 	assert.equal(readFileSync(file, "utf8"), "human edit meanwhile\n");
 	assert.match(seenToolResults.at(-1), /changed on disk/);
+});
+
+test("files written by bash become a revertable changeset", async () => {
+	mainScript.push(() => fauxAssistantMessage(fauxToolCall("bash", { command: `node -e "require('fs').writeFileSync('generated.txt', 'from bash')"` }), { stopReason: "toolUse" }));
+	await session.prompt("generate a file");
+	const generated = join(workdir, "generated.txt");
+	assert.ok(existsSync(generated), seenToolResults.at(-1));
+	const changeset = await waitFor(async () => (await api("GET", "/api/state")).changesets.find((c) => c.status === "open" && c.files.some((f) => f.path === "generated.txt")), "bash changeset");
+	assert.deepEqual(changeset.files.map((f) => [f.path, f.status]), [["generated.txt", "added"]]);
+	const result = await api("POST", `/api/changesets/${changeset.id}/resolve`, { files: [{ path: "generated.txt", content: null }], comment: "no generated files please" });
+	assert.equal(result.status, "reverted");
+	assert.ok(!existsSync(generated));
+	await waitFor(async () => session.messages.some((m) => JSON.stringify(m.content ?? "").includes("no generated files please")), "feedback delivered to agent");
+});
+
+test("checkpoint mode applies edits freely and reviews the whole turn", async () => {
+	writeFileSync(file, "hello\nworld\n");
+	await api("POST", "/api/sessions/e2e-agent/mode", { mode: "checkpoint" });
+	await waitFor(async () => (await api("GET", "/api/state")).sessions.find((s) => s.id === "e2e-agent")?.reviewMode === "checkpoint", "mode synced");
+	await new Promise((r) => setTimeout(r, 200));
+	mainScript.push(editCall("world", "checkpoint"));
+	await session.prompt("change in checkpoint mode");
+	assert.equal(readFileSync(file, "utf8"), "hello\ncheckpoint\n");
+	const changeset = await waitFor(async () => (await api("GET", "/api/state")).changesets.find((c) => c.status === "open" && c.kind === "turn"), "turn changeset");
+	assert.ok(changeset.files.some((f) => f.path === "notes.txt"));
+	const full = (await api("GET", `/api/changesets/${changeset.id}`)).changeset;
+	const notes = full.files.find((f) => f.path === "notes.txt");
+	await api("POST", `/api/changesets/${changeset.id}/resolve`, { files: [{ path: "notes.txt", content: notes.before }] });
+	assert.equal(readFileSync(file, "utf8"), notes.before);
+	await api("POST", "/api/sessions/e2e-agent/mode", { mode: "gate" });
 });

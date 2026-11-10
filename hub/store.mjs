@@ -2,10 +2,11 @@ import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { STATE_FILE, ensureHubDir } from "./config.mjs";
 
-export const COLLECTIONS = ["sessions", "reviews", "inbox", "tasks", "testRuns", "prs", "results", "messages"];
+export const COLLECTIONS = ["sessions", "reviews", "changesets", "inbox", "tasks", "testRuns", "prs", "results", "messages"];
 
 const LIMITS = {
 	reviews: 300,
+	changesets: 200,
 	inbox: 500,
 	testRuns: 200,
 	results: 300,
@@ -125,7 +126,7 @@ export class Store {
 		}
 		if (map.size <= limit) return;
 		const removable = [...map.values()]
-			.filter((item) => (name === "reviews" ? SETTLED.has(item.status) : item.status !== "running") && !(name === "inbox" && !item.resolved && BLOCKING_INBOX.has(item.kind)))
+			.filter((item) => (name === "reviews" ? SETTLED.has(item.status) : name === "changesets" ? item.status !== "open" : item.status !== "running") && !(name === "inbox" && !item.resolved && BLOCKING_INBOX.has(item.kind)))
 			.sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
 		for (const item of removable.slice(0, map.size - limit)) map.delete(item.id);
 	}
@@ -164,6 +165,7 @@ export class Store {
 }
 
 export function publicView(name, item) {
+	if (name === "changesets") return { ...item, files: item.files?.map(({ before, after, ...rest }) => rest) };
 	if (name !== "reviews") return item;
 	return {
 		...item,
