@@ -40,7 +40,9 @@ test("run comparison and flaky detection", () => {
 	const a = { tests: [{ name: "x", status: "passed" }, { name: "y", status: "failed" }] };
 	const b = { tests: [{ name: "x", status: "failed" }, { name: "y", status: "passed" }] };
 	assert.deepEqual(compareRuns(a, b), { newFailures: ["x"], fixed: ["y"] });
-	assert.deepEqual(flakyTests([a, b, a]), ["x", "y"]);
+	assert.deepEqual(flakyTests([a, b, a]), []);
+	assert.deepEqual(flakyTests([{ ...a, changeMark: 1 }, { ...b, changeMark: 2 }, { ...a, changeMark: 3 }]), []);
+	assert.deepEqual(flakyTests([{ ...a, changeMark: 5 }, { ...b, changeMark: 5 }]), ["x", "y"]);
 });
 
 test("test command detection", () => {

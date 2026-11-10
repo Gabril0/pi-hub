@@ -36,7 +36,7 @@ await call("POST", "/api/sessions/demo-rust/state", { context: { tokens: 42000, 
 
 const rustBefore = `fn parity(n: u32) -> &'static str {\n    if n % 2 == 0 {\n        "even"\n    } else {\n        "odd"\n    }\n}\n\nfn main() {\n    for n in 1..=8 {\n        println!("{n} is {}", parity(n));\n    }\n}\n`;
 const rustAfter = `fn parity(n: u32) -> &'static str {\n    match n % 2 {\n        0 => "tung",\n        _ => "sahur",\n    }\n}\n\nfn chant(limit: u32) -> String {\n    (1..=limit).map(parity).collect::<Vec<_>>().join(" ")\n}\n\nfn main() {\n    for n in 1..=8 {\n        println!("{n} is {}", parity(n));\n    }\n    println!("{}", chant(4));\n}\n`;
-const rustReview = await call("POST", "/api/reviews", { sessionId: "demo-rust", tool: "edit", path: "src/main.rs", absPath: posix.join(work, "tung-sahur", "src", "main.rs"), oldContent: rustBefore, newContent: rustAfter });
+const rustReview = await call("POST", "/api/reviews", { sessionId: "demo-rust", tool: "edit", path: "src/main.rs", absPath: posix.join(work, "tung-sahur", "src", "main.rs"), oldContent: rustBefore, newContent: rustAfter, intent: "Switching `parity` to a `match` so even numbers chant **tung** and odd ones **sahur**, then adding `chant(limit)` to join them." });
 await call("POST", `/api/reviews/${rustReview.id}/chat`, { role: "user", text: "why switch the if/else to a match?" });
 await call("POST", `/api/reviews/${rustReview.id}/chat`, { role: "agent", text: "`match n % 2` makes both arms explicit, so **0 → `tung`** and anything else → `sahur`. `chant(4)` then prints `sahur tung sahur tung`." });
 
@@ -46,6 +46,7 @@ await call("POST", "/api/sessions/demo-api/events", {
 		{ kind: "tool_start", toolName: "bash", summary: "cargo tree -i acme_http" },
 		{ kind: "assistant", text: "All eight acme_* crates point at older revs. I'll align them to 4f2c9e1 so cargo stops building duplicate copies." },
 		{ kind: "progress", steps: [{ title: "Find current revs", status: "done" }, { title: "Bump Cargo.toml", status: "active" }, { title: "cargo check", status: "pending" }, { title: "Open PR", status: "pending" }], note: "waiting for review on Cargo.toml" },
+		...Array.from({ length: 7 }, () => ({ kind: "turn_end" })),
 		{ kind: "usage", cost: 3.42, input: 220000, output: 18000, cacheRead: 900000 },
 	],
 });
@@ -54,6 +55,7 @@ await call("POST", "/api/sessions/demo-web/events", {
 		{ kind: "agent_start", prompt: "Show a discount badge on invoices that have a coupon applied, and add tests for it." },
 		{ kind: "progress", steps: [{ title: "Read invoice renderer", status: "done" }, { title: "Add discounted field", status: "done" }, { title: "Write tests", status: "active" }] },
 		{ kind: "assistant", text: "Renderer now reads `discounted`. Writing table-driven tests next." },
+		...Array.from({ length: 4 }, () => ({ kind: "turn_end" })),
 		{ kind: "usage", cost: 1.18, input: 90000, output: 9000, cacheRead: 300000 },
 	],
 });
@@ -72,20 +74,33 @@ const crates = ["acme_auth", "acme_billing", "acme_core", "acme_db", "acme_event
 const oldRevs = { 1: "7d0e2b6a91c4f38e5a2d7c1b9e6f40a3c8d5e217", 5: "c3a91f7e2b8d4065f1e9a7c2d3b5480e6f1a9c4d" };
 const before = `[package]\nname = "orders-api"\nversion = "0.14.2"\nedition = "2021"\n\n[dependencies]\n${crates.map((c, i) => `${c} = { git = "ssh://git@github.com/acme/acme-sdk.git", rev = "${oldRevs[i] ?? "1b6f0d93e7a24c58b0f3e9d2a6c71e48f5b0d3a9"}" }`).join("\n")}\ntokio = { version = "1.40", features = ["full"] }\nserde = "1"\n`;
 const after = before.replace(/rev = "[0-9a-f]+"/g, 'rev = "4f2c9e18a0b7d35e6c1f92a4b8e07d5c3a6f1e20"');
-await call("POST", "/api/reviews", { sessionId: "demo-api", tool: "edit", path: "Cargo.toml", absPath: posix.join(work, "orders-api", "Cargo.toml"), oldContent: before, newContent: after });
+await call("POST", "/api/reviews", { sessionId: "demo-api", tool: "edit", path: "Cargo.toml", absPath: posix.join(work, "orders-api", "Cargo.toml"), oldContent: before, newContent: after, intent: "All eight acme_* crates point at older revs. I'll align them to 4f2c9e1 so cargo stops building duplicate copies." });
 
 const tsBefore = `export interface Invoice {\n\tid: string;\n\tamount: number;\n\tcurrency: string;\n}\n\nexport function renderInvoice(i: Invoice): string {\n\tconst value = (i.amount / 100).toFixed(2);\n\treturn \`\${i.id}: \${value} \${i.currency}\`;\n}\n\nexport function renderAll(list: Invoice[]): string[] {\n\treturn list.map(renderInvoice);\n}\n`;
 const tsAfter = `export interface Invoice {\n\tid: string;\n\tamount: number;\n\tcurrency: string;\n\tdiscounted?: boolean;\n}\n\nexport function renderInvoice(i: Invoice): string {\n\tconst value = (i.amount / 100).toFixed(2);\n\tconst badge = i.discounted ? " (discount)" : "";\n\treturn \`\${i.id}: \${value} \${i.currency}\${badge}\`;\n}\n\nexport function renderAll(list: Invoice[]): string[] {\n\treturn list.filter(Boolean).map(renderInvoice);\n}\n`;
-const review2 = await call("POST", "/api/reviews", { sessionId: "demo-web", tool: "edit", path: "src/invoice.ts", absPath: posix.join(work, "storefront-web", "src", "invoice.ts"), oldContent: tsBefore, newContent: tsAfter });
+const review2 = await call("POST", "/api/reviews", { sessionId: "demo-web", tool: "edit", path: "src/invoice.ts", absPath: posix.join(work, "storefront-web", "src", "invoice.ts"), oldContent: tsBefore, newContent: tsAfter, intent: "Adding an optional `discounted` flag and a badge suffix, and skipping `null` rows the API sends during refunds." });
 await call("POST", `/api/reviews/${review2.id}/chat`, { role: "user", text: "why filter(Boolean)?" });
 await call("POST", `/api/reviews/${review2.id}/chat`, { role: "agent", text: "The orders endpoint occasionally returns `null` rows while a **refund is processing**; `filter(Boolean)` drops them so `renderInvoice` never sees `undefined`." });
 
 await call("POST", "/api/questions", { sessionId: "demo-web", question: "Should discounted invoices also show the original price struck through, or only the badge?", options: ["Badge only", "Show both", "Ask design"] });
 await call("POST", "/api/messages", { from: "demo-sdk", to: "human", body: "sdk **4f2c9e1** is tagged. api and web can re-pin now." });
 
-const cargoOut = `running 5 tests\ntest invoice::tests::renders_amount ... ok\ntest invoice::tests::renders_discount ... FAILED\ntest retry::tests::retries ... ok\ntest retry::tests::backoff ... ok\ntest events::tests::drains ... ok\n\nfailures:\n\n---- invoice::tests::renders_discount stdout ----\nthread 'invoice::tests::renders_discount' panicked at src/invoice.rs:88:9:\nassertion \`left == right\` failed\n  left: "42.00 USD"\n right: "42.00 USD (discount)"\n\nfailures:\n    invoice::tests::renders_discount\n\ntest result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out\n`;
-await call("POST", "/api/tests/ingest", { sessionId: "demo-web", cwd: posix.join(work, "storefront-web"), command: "cargo test", output: cargoOut.replace("FAILED. 4 passed; 1 failed", "ok. 5 passed; 0 failed").replace("renders_discount ... FAILED", "renders_discount ... ok"), exitCode: 0 });
-await call("POST", "/api/tests/ingest", { sessionId: "demo-web", cwd: posix.join(work, "storefront-web"), command: "cargo test", output: cargoOut, exitCode: 101 });
+const cargoOut = `running 4 tests\ntest orders::tests::applies_discount ... ok\ntest retry::tests::retries ... ok\ntest retry::tests::backoff ... ok\ntest events::tests::drains ... ok\n\ntest result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n`;
+await call("POST", "/api/tests/ingest", { sessionId: "demo-api", cwd: posix.join(work, "orders-api"), command: "cargo test", output: cargoOut, exitCode: 0 });
+const vitestPass = ` ✓ src/invoice.test.ts > renderInvoice > renders amount 2ms\n ✓ src/invoice.test.ts > renderInvoice > skips null rows 1ms\n ✓ src/invoice.test.ts > renderInvoice > renders currency 1ms\n ✓ src/invoice.test.ts > renderInvoice > renders discount badge 3ms\n\n Test Files  1 passed (1)\n      Tests  4 passed (4)\n`;
+const vitestFail = vitestPass.replace(" ✓ src/invoice.test.ts > renderInvoice > renders discount badge 3ms", " × src/invoice.test.ts > renderInvoice > renders discount badge 3ms").replace("Test Files  1 passed (1)", "Test Files  1 failed (1)").replace("Tests  4 passed (4)", "Tests  1 failed | 3 passed (4)") + `\n FAIL  src/invoice.test.ts > renderInvoice > renders discount badge\nAssertionError: expected '42.00 USD' to be '42.00 USD (discount)'\n ❯ src/invoice.test.ts:31:42\n`;
+await call("POST", "/api/tests/ingest", { sessionId: "demo-web", cwd: posix.join(work, "storefront-web"), command: "npx vitest run", output: vitestPass, exitCode: 0 });
+await call("POST", "/api/tests/ingest", { sessionId: "demo-web", cwd: posix.join(work, "storefront-web"), command: "npx vitest run", output: vitestFail, exitCode: 1 });
+await call("POST", "/api/changesets", {
+	sessionId: "demo-web",
+	kind: "bash",
+	title: "npm run codegen && npm pkg set version=2.4.0",
+	root: posix.join(work, "storefront-web"),
+	files: [
+		{ path: "src/gen/orders-client.ts", status: "added", before: null, after: "export interface Order {\n\tid: string;\n\ttotal: number;\n\tdiscounted?: boolean;\n}\n\nexport async function getOrder(id: string): Promise<Order> {\n\tconst res = await fetch(`/api/orders/${id}`);\n\treturn res.json();\n}\n" },
+		{ path: "package.json", status: "modified", before: "{\n  \"name\": \"storefront-web\",\n  \"version\": \"2.3.1\",\n  \"private\": true\n}\n", after: "{\n  \"name\": \"storefront-web\",\n  \"version\": \"2.4.0\",\n  \"private\": true\n}\n" },
+	],
+});
 await call("POST", "/api/tests/ingest", { sessionId: "demo-sdk", cwd: posix.join(work, "acme-sdk"), command: "go test ./... -v", output: "=== RUN   TestRetry\n--- PASS: TestRetry (0.02s)\n=== RUN   TestBackoff\n--- PASS: TestBackoff (0.11s)\nok  \tacme-sdk/retry\t0.140s\n", exitCode: 0 });
 
 const t1 = await call("POST", "/api/tasks", { title: "Release SDK with retries", status: "done", owner: "demo-sdk" });

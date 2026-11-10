@@ -209,17 +209,16 @@ export function flakyTests(runs) {
 	const history = new Map();
 	for (const run of runs) {
 		for (const test of run.tests ?? []) {
+			if (test.status === "skipped") continue;
 			const list = history.get(test.name) ?? [];
-			list.push(test.status);
+			list.push({ status: test.status, mark: run.changeMark ?? null });
 			history.set(test.name, list);
 		}
 	}
 	const flaky = [];
-	for (const [name, statuses] of history) {
-		const relevant = statuses.filter((s) => s !== "skipped");
-		let flips = 0;
-		for (let i = 1; i < relevant.length; i++) if (relevant[i] !== relevant[i - 1]) flips++;
-		if (flips >= 2) flaky.push(name);
+	for (const [name, entries] of history) {
+		const unchangedFlip = entries.some((entry, i) => i > 0 && entry.status !== entries[i - 1].status && entry.mark !== null && entry.mark === entries[i - 1].mark);
+		if (unchangedFlip) flaky.push(name);
 	}
 	return flaky;
 }

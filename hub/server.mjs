@@ -214,6 +214,7 @@ export function createHub({ port = PORT, stateFile, silent = false, openBrowserF
 	}
 
 	const pendingSpawns = [];
+	const changeMarks = new Map();
 
 	function claimSpawn(cwd) {
 		const now = Date.now();
@@ -297,13 +298,14 @@ export function createHub({ port = PORT, stateFile, silent = false, openBrowserF
 		const now = Date.now();
 		switch (event.kind) {
 			case "agent_start":
-				store.patch("sessions", sessionId, { status: "working", currentPrompt: excerpt(event.prompt, 400), runStartedAt: now, runTurns: 0, lastActivity: now });
+				store.patch("sessions", sessionId, { status: "working", currentPrompt: excerpt(event.prompt, 400), runStartedAt: now, runTurns: 0, runStartCost: session.usage?.cost ?? 0, lastActivity: now });
 				store.appendEvent(sessionId, { kind: "agent_start", text: excerpt(event.prompt, 600) });
 				break;
 			case "turn_end":
 				store.patch("sessions", sessionId, { turns: (session.turns ?? 0) + 1, runTurns: (session.runTurns ?? 0) + 1, lastActivity: now });
 				break;
 			case "tool_start":
+				if (["edit", "write", "bash"].includes(event.toolName)) changeMarks.set(pathKey(session.cwd ?? ""), now);
 				store.patch("sessions", sessionId, { lastTool: { name: event.toolName, summary: excerpt(event.summary, 160), at: now }, lastActivity: now });
 				store.appendEvent(sessionId, { kind: "tool", toolName: event.toolName, text: excerpt(event.summary, 300), toolCallId: event.toolCallId });
 				break;
@@ -334,7 +336,7 @@ export function createHub({ port = PORT, stateFile, silent = false, openBrowserF
 						error: event.error,
 						durationMs: duration,
 						turns: session.runTurns,
-						cost: session.usage?.cost,
+						cost: Math.max(0, (session.usage?.cost ?? 0) - (session.runStartCost ?? 0)),
 						files: event.files ?? [],
 					});
 				}
@@ -481,7 +483,8 @@ export function createHub({ port = PORT, stateFile, silent = false, openBrowserF
 			.filter((r) => r.id !== id && r.cwd === cwd && r.command === command && r.status !== "running")
 			.sort((a, b) => b.createdAt - a.createdAt);
 		const comparison = compareRuns(history[0], parsed);
-		const flaky = flakyTests([...history.slice(0, 9).reverse(), parsed]);
+		const changeMark = changeMarks.get(pathKey(cwd ?? "")) ?? 0;
+		const flaky = flakyTests([...history.slice(0, 9).reverse(), { ...parsed, changeMark }]);
 		const run = store.upsert("testRuns", {
 			id,
 			sessionId,
@@ -497,6 +500,7 @@ export function createHub({ port = PORT, stateFile, silent = false, openBrowserF
 			summary: parsed.summary,
 			tests: parsed.tests.map((t) => ({ ...t, output: t.output ? String(t.output).slice(0, 8000) : undefined })),
 			outputTail: stripAnsi(output.slice(-12000)),
+			changeMark,
 			newFailures: comparison.newFailures,
 			fixed: comparison.fixed,
 			flaky,
