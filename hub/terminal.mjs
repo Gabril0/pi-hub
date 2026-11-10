@@ -1,4 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { platform } from "node:os";
 import { hasCommand } from "./notify.mjs";
 
@@ -79,8 +80,8 @@ export function tmuxServerRunning(socket) {
 	return result.status === 0;
 }
 
-export function spawnPlan({ cwd, prompt, name, piCommand = "pi", tmuxSocket, termProgram }, os = platform(), tmuxAvailable = tmuxServerRunning(tmuxSocket)) {
-	const piArgs = prompt ? [prompt] : [];
+export function spawnPlan({ cwd, prompt, name, piCommand = "pi", tmuxSocket, termProgram, extraArgs = [] }, os = platform(), tmuxAvailable = tmuxServerRunning(tmuxSocket)) {
+	const piArgs = [...extraArgs, ...(prompt ? [prompt] : [])];
 	if (os !== "win32" && tmuxAvailable) {
 		const base = tmuxSocket ? ["-S", tmuxSocket] : [];
 		return { command: "tmux", args: [...base, "new-window", "-c", cwd, "-n", name || "pi", piCommand, ...piArgs], via: "tmux" };
@@ -103,6 +104,30 @@ export function spawnPlan({ cwd, prompt, name, piCommand = "pi", tmuxSocket, ter
 	if (hasCommand("gnome-terminal")) return { command: "gnome-terminal", args: [`--working-directory=${cwd}`, "--", piCommand, ...piArgs], via: "gnome-terminal" };
 	if (hasCommand("konsole")) return { command: "konsole", args: ["--workdir", cwd, "-e", piCommand, ...piArgs], via: "konsole" };
 	return { command: "x-terminal-emulator", args: ["-e", piCommand, ...piArgs], via: "x-terminal-emulator", cwd };
+}
+
+export function slugify(value) {
+	return (
+		String(value ?? "")
+			.toLowerCase()
+			.replace(/[^a-z0-9]+/g, "-")
+			.replace(/^-+|-+$/g, "")
+			.slice(0, 40) || "agent"
+	);
+}
+
+export function createWorktree(cwd, name) {
+	const top = spawnSync("git", ["rev-parse", "--show-toplevel"], { cwd, encoding: "utf8", windowsHide: true });
+	if (top.status !== 0) return { error: "not a git repository" };
+	const repoRoot = top.stdout.trim();
+	const slug = slugify(name);
+	const base = `${repoRoot.replace(/[\\/]+$/, "")}-${slug}`;
+	let target = base;
+	for (let i = 2; spawnSync("git", ["-C", repoRoot, "worktree", "list", "--porcelain"], { encoding: "utf8", windowsHide: true }).stdout.includes(target) || existsSync(target); i++) target = `${base}-${i}`;
+	const branch = `agent/${slug}-${Date.now().toString(36)}`;
+	const added = spawnSync("git", ["-C", repoRoot, "worktree", "add", "-b", branch, target], { encoding: "utf8", windowsHide: true });
+	if (added.status !== 0) return { error: (added.stderr || added.stdout || "git worktree add failed").trim() };
+	return { path: target, branch };
 }
 
 export async function spawnAgent(options) {

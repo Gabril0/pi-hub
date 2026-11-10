@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { hostname } from "node:os";
-import { basename } from "node:path";
+import { basename, isAbsolute, relative } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { Type } from "typebox";
 import { buildProposal, changedSinceProposal, diffStats, type Proposal, rewriteInputForContent } from "./edits";
@@ -82,6 +82,12 @@ function toolSummary(toolName: string, args: any): string {
 	} catch {
 		return toolName;
 	}
+}
+
+function relativeTo(cwd: string, file: string): string {
+	if (!isAbsolute(file)) return file;
+	const rel = relative(cwd, file);
+	return rel.startsWith("..") ? file : rel.split("\\").join("/");
 }
 
 export function formatDenial(path: string, decision: ReviewDecision): string {
@@ -407,6 +413,8 @@ export default function piHub(pi: ExtensionAPI) {
 	pi.on("before_agent_start", async (event, ctx) => {
 		latestCtx = ctx;
 		lastPrompt = event.prompt ?? "";
+		const context = await teamContext(ctx.cwd);
+		if (context) return { systemPrompt: `${event.systemPrompt}\n\n${context}` };
 	});
 
 	pi.on("agent_start", async (_event, ctx) => {
@@ -472,6 +480,25 @@ export default function piHub(pi: ExtensionAPI) {
 			const files = await diffSnapshots(before, after);
 			if (files.length) await client.post("/api/changesets", { sessionId: id, kind, title, root: before.root, files });
 		} catch {}
+	}
+
+	async function teamContext(cwd: string): Promise<string | undefined> {
+		try {
+			const { agents } = await Promise.race([client.get("/api/agents"), new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timeout")), 1500))]);
+			const others = (agents as any[]).filter((agent) => agent.id !== id);
+			if (!others.length) return undefined;
+			const lines = others.map((agent) => {
+				const files = (agent.files ?? []).map((file: string) => relativeTo(cwd, file)).slice(0, 8);
+				return `- ${agent.name} (${agent.repo ?? "?"}@${agent.branch ?? "?"}, ${agent.status})${agent.task ? `: ${String(agent.task).slice(0, 140)}` : ""}${files.length ? `\n  files in progress: ${files.join(", ")}` : ""}`;
+			});
+			return [
+				"## Other agents working on this machine (via pi hub)",
+				...lines,
+				"Do not edit files another agent has in progress without coordinating first. Use hub_message to talk to an agent by name, and hub_tasks for shared work.",
+			].join("\n");
+		} catch {
+			return undefined;
+		}
 	}
 
 	function currentIntent(ctx: ExtensionContext): string | undefined {

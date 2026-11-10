@@ -10,7 +10,7 @@ import { HOST, HUB_DIR, LOG_FILE, PORT, ensureHubDir, loadConfig, mergeDeep, rea
 import { fetchPrForCwd, ghAvailable, prTransitions } from "./github.mjs";
 import { createNotifier } from "./notify.mjs";
 import { Store, newId, publicView } from "./store.mjs";
-import { focusSession, openBrowser, spawnAgent } from "./terminal.mjs";
+import { createWorktree, focusSession, openBrowser, spawnAgent } from "./terminal.mjs";
 import { compareRuns, defaultTestCommand, flakyTests, parseTestOutput, stripAnsi } from "./test-parsers.mjs";
 
 import { HUB_VERSION } from "./version.mjs";
@@ -213,8 +213,27 @@ export function createHub({ port = PORT, stateFile, silent = false, openBrowserF
 		return Object.fromEntries(keys.filter((key) => source?.[key] !== undefined).map((key) => [key, source[key]]));
 	}
 
+	const pendingSpawns = [];
+
+	function claimSpawn(cwd) {
+		const now = Date.now();
+		for (let i = pendingSpawns.length - 1; i >= 0; i--) if (pendingSpawns[i].expires < now) pendingSpawns.splice(i, 1);
+		const index = pendingSpawns.findIndex((spawn) => spawn.cwd === pathKey(cwd ?? ""));
+		return index === -1 ? undefined : pendingSpawns.splice(index, 1)[0];
+	}
+
 	function registerSession(rawBody) {
 		const body = pick(rawBody, REGISTER_FIELDS);
+		const spawned = store.get("sessions", body.id) ? undefined : claimSpawn(body.cwd);
+		if (spawned) {
+			body.reviewMode = spawned.mode;
+			setTimeout(() => {
+				store.patch("sessions", body.id, { trust: spawned.trust, reviewMode: spawned.mode });
+				sendToSession(body.id, { type: "trust", mode: spawned.trust });
+				sendToSession(body.id, { type: "mode", mode: spawned.mode });
+				if (spawned.taskId && store.get("tasks", spawned.taskId)) store.patch("tasks", spawned.taskId, { owner: body.id, status: "doing" });
+			}, 1500);
+		}
 		const sessions = store.all("sessions");
 		const previous = store.get("sessions", body.id);
 		const color = pickColor(sessions, body.id);
@@ -883,7 +902,19 @@ export function createHub({ port = PORT, stateFile, silent = false, openBrowserF
 		agents: store
 			.all("sessions")
 			.filter((s) => s.online)
-			.map((s) => ({ id: s.id, name: sessionLabel(s), color: s.color?.name, cwd: s.cwd, repo: s.repo, branch: s.branch, status: s.status, task: s.currentPrompt, progress: s.progress, summary: s.summary?.text })),
+			.map((s) => ({
+				id: s.id,
+				name: sessionLabel(s),
+				color: s.color?.name,
+				cwd: s.cwd,
+				repo: s.repo,
+				branch: s.branch,
+				status: s.status,
+				task: s.currentPrompt,
+				progress: s.progress,
+				summary: s.summary?.text,
+				files: [...new Set([...store.all("reviews").filter((r) => r.sessionId === s.id && ["pending", "thinking"].includes(r.status)).map((r) => r.absPath), ...(s.filesTouched ?? []).slice(-15)])],
+			})),
 	}));
 	route("POST", "/api/messages", ({ body }) => {
 		const fromSession = store.get("sessions", body.from);
@@ -961,12 +992,26 @@ export function createHub({ port = PORT, stateFile, silent = false, openBrowserF
 	});
 
 	route("POST", "/api/spawn", async ({ body }) => {
-		const cwd = body.cwd && isAbsolute(body.cwd) ? body.cwd : undefined;
+		let cwd = body.cwd && isAbsolute(body.cwd) ? body.cwd : undefined;
 		if (!cwd || !existsSync(cwd)) return [400, { error: "cwd must be an existing absolute path" }];
+		const task = body.taskId ? store.get("tasks", body.taskId) : undefined;
+		let worktree;
+		if (body.worktree) {
+			worktree = createWorktree(cwd, body.name || task?.title || "agent");
+			if (worktree.error) return [400, { error: `worktree: ${worktree.error}` }];
+			cwd = worktree.path;
+		}
+		const prompt = body.prompt?.trim()
+			? body.prompt
+			: task
+				? `Work on task ${task.id}: "${task.title}". ${task.description ?? ""}\nUse the hub_tasks tool to update its status as you go.`.trim()
+				: "";
+		pendingSpawns.push({ cwd: pathKey(cwd), trust: body.trust === "auto" ? "auto" : "review", mode: body.mode === "checkpoint" ? "checkpoint" : "gate", taskId: task?.id, expires: Date.now() + 10 * 60_000 });
 		const reference = store.all("sessions").find((s) => s.online && s.tmuxSocket);
-		const result = await spawnAgent({ cwd, prompt: body.prompt, name: body.name, piCommand: config.piCommand ?? "pi", tmuxSocket: reference?.tmuxSocket, termProgram: reference?.termProgram });
+		const extraArgs = typeof body.model === "string" && body.model.trim() ? ["--model", body.model.trim()] : [];
+		const result = await spawnAgent({ cwd, prompt, name: body.name || task?.title, piCommand: config.piCommand ?? "pi", tmuxSocket: reference?.tmuxSocket, termProgram: reference?.termProgram, extraArgs });
 		log(`spawn ${cwd} via ${result.via} ok=${result.ok}`);
-		return result;
+		return { ...result, cwd, branch: worktree?.branch };
 	});
 
 	route("POST", "/api/results/:id/delete", ({ params }) => {
