@@ -185,3 +185,28 @@ test("a pending review survives a hub restart", async () => {
 	await run;
 	assert.equal(readFileSync(file, "utf8"), "hello\nrestart\n");
 });
+
+test("approval notes and reviewer edits reach the agent", async () => {
+	writeFileSync(file, "hello\nworld\n");
+	mainScript.push(editCall("world", "notes"));
+	const run = session.prompt("change with notes");
+	const review = await waitFor(async () => (await api("GET", "/api/state")).reviews.find((r) => r.status === "pending"), "pending review");
+	await api("POST", `/api/reviews/${review.id}/decision`, { decision: "approve", comment: "ship it but add a test", content: "hello\nnotes!\n" });
+	await run;
+	assert.equal(readFileSync(file, "utf8"), "hello\nnotes!\n");
+	const result = seenToolResults.at(-1);
+	assert.match(result, /ship it but add a test/);
+	assert.match(result, /differs from your proposal/);
+});
+
+test("a file changed while its review is open is not overwritten", async () => {
+	writeFileSync(file, "hello\nworld\n");
+	mainScript.push(() => fauxAssistantMessage(fauxToolCall("write", { path: "notes.txt", content: "agent version\n" }), { stopReason: "toolUse" }));
+	const run = session.prompt("overwrite");
+	const review = await waitFor(async () => (await api("GET", "/api/state")).reviews.find((r) => r.status === "pending"), "pending review");
+	writeFileSync(file, "human edit meanwhile\n");
+	await api("POST", `/api/reviews/${review.id}/decision`, { decision: "approve" });
+	await run;
+	assert.equal(readFileSync(file, "utf8"), "human edit meanwhile\n");
+	assert.match(seenToolResults.at(-1), /changed on disk/);
+});
