@@ -64,7 +64,7 @@ function ResultDetail({ result }) {
 			<div class="stats" style="margin-top:14px">
 				<${Stat} value=${result.durationMs != null ? duration(result.durationMs) : "–"} label="duration" />
 				<${Stat} value=${result.turns ?? "–"} label="turns" />
-				<${Stat} value=${money(result.cost)} label="session cost" />
+				<${Stat} value=${money(result.cost)} label="cost" />
 				<${Stat} value=${result.files?.length ?? 0} label="files" />
 			</div>
 		</div>

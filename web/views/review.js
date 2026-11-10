@@ -1,10 +1,10 @@
 import { html, useEffect, useMemo, useRef, useState } from "../vendor/preact-htm.js";
 import { alignBlock, buildHunks, contentWithBlocks, diffOps, escape, highlightLines, languageFor, pairRows, smartCollapse, stats, wordDiff } from "../lib/diff.js";
-import { api, pendingReviews, sessionOf, sorted, useStore } from "../lib/store.js";
+import { api, openChangesets, pendingReviews, sessionOf, sorted, toast, useStore } from "../lib/store.js";
 import { Icon } from "../lib/icons.js";
-import { Empty, Markdown, Modal, SessionChip, Status, colorOf, isTyping, navigate, sessionName, timeAgo } from "../lib/util.js";
+import { Empty, LineStats, Markdown, Modal, SessionChip, Status, colorOf, isTyping, navigate, sessionName, timeAgo } from "../lib/util.js";
 
-function DiffStat({ added, removed }) {
+export function DiffStat({ added, removed }) {
 	const total = added + removed || 1;
 	const boxes = 5;
 	const a = Math.round((added / total) * boxes);
@@ -162,6 +162,8 @@ function GapRow({ gap, colSpan, onExpand }) {
 	</td></tr>`;
 }
 
+const BLOCK_LABELS = { on: "include", off: "excluded — keeps original", title: "Include this change when approving" };
+
 export function DiffViewer({
 	oldText,
 	newText,
@@ -177,6 +179,7 @@ export function DiffViewer({
 	onRemoveComment,
 	focusBlock,
 	onModel,
+	blockLabels = BLOCK_LABELS,
 }) {
 	const [expanded, setExpanded] = useState(new Map());
 	const [openCollapsed, setOpenCollapsed] = useState(new Set());
@@ -263,8 +266,8 @@ export function DiffViewer({
 				<div class="row">
 					<span class="hunk-label">${hunkLabel(block)}</span>
 					${onToggleBlock
-						? html`<span class=${`block-toggle ${off ? "off" : ""}`} onClick=${() => onToggleBlock(block)} title="Include this change when approving">
-								<span class="box">✓</span>${off ? "excluded — keeps original" : "include"}
+						? html`<span class=${`block-toggle ${off ? "off" : ""}`} onClick=${() => onToggleBlock(block)} title=${blockLabels.title}>
+								<span class="box">✓</span>${off ? blockLabels.off : blockLabels.on}
 							</span>`
 						: null}
 					${summary
@@ -369,7 +372,7 @@ function defaultPrefs() {
 	return { mode: window.innerWidth < 1440 ? "unified" : "split", wrap: true, ignoreWhitespace: false, context: 3 };
 }
 
-function loadPrefs() {
+export function loadPrefs() {
 	try {
 		return { ...defaultPrefs(), ...JSON.parse(localStorage.getItem("pi-hub-diff") ?? "{}") };
 	} catch {
@@ -377,7 +380,7 @@ function loadPrefs() {
 	}
 }
 
-function savePrefs(prefs) {
+export function savePrefs(prefs) {
 	try {
 		localStorage.setItem("pi-hub-diff", JSON.stringify(prefs));
 	} catch {}
@@ -429,6 +432,26 @@ function dirOf(path) {
 function baseOf(path) {
 	const normalized = String(path ?? "").replace(/\\/g, "/");
 	return normalized.slice(normalized.lastIndexOf("/") + 1);
+}
+
+function WhyBlock({ intent, step }) {
+	const [expanded, setExpanded] = useState(false);
+	const [overflowing, setOverflowing] = useState(false);
+	const bodyRef = useRef();
+	useEffect(() => {
+		const el = bodyRef.current;
+		if (el) setOverflowing(el.scrollHeight > el.clientHeight + 2);
+	}, [intent]);
+	if (!intent?.trim() && !step) return null;
+	return html`<div class="why-block">
+		<div class="why-head">
+			<span class="why-label">Why</span>
+			${step ? html`<span class="pill accent why-step" title="Active plan step">▸ ${step}</span>` : null}
+			<span class="spacer"></span>
+			${overflowing || expanded ? html`<button class="btn sm ghost" onClick=${() => setExpanded(!expanded)}>${expanded ? "Show less" : "Show more"}</button>` : null}
+		</div>
+		${intent?.trim() ? html`<div ref=${bodyRef} class=${`why-body ${expanded ? "" : "clamped"} ${overflowing && !expanded ? "faded" : ""}`}><${Markdown} text=${intent} /></div>` : null}
+	</div>`;
 }
 
 function AgentMessage({ session, suffix, children }) {
@@ -517,12 +540,21 @@ export function ReviewView({ id }) {
 				if (rejected.size && partialAllowed && model) body.content = contentWithBlocks(model.ops, rejected);
 				else if (revIndex !== latestIndex) body.content = current.content;
 			}
-			await api("POST", `/api/reviews/${id}/decision`, body);
+			const { delivered } = await api("POST", `/api/reviews/${id}/decision`, body);
+			toast({
+				kind: "review",
+				sessionId: review.sessionId,
+				tone: delivered ? "ok" : "warn",
+				title: `${decision === "approve" ? "Approved" : "Denied"} ${review.path}`,
+				body: delivered ? "delivered" : "agent offline, not delivered",
+			});
 			decided.current = true;
 			reviewMemory.delete(id);
 			setDraft("");
 			setComments([]);
 			setTimeout(goNext, 350);
+		} catch (error) {
+			toast({ kind: "error", sessionId: review.sessionId, tone: "bad", title: "Decision failed", body: error.message });
 		} finally {
 			setBusy(false);
 		}
@@ -607,6 +639,8 @@ export function ReviewView({ id }) {
 		${review.conflicts?.length
 			? html`<div class="conflict-banner">⚠ Also touched by ${review.conflicts.map((c) => html`<span class="pill" style=${`color:${c.color?.hex}`}>● ${c.name}</span>`)} — coordinate before approving.</div>`
 			: null}
+
+		<${WhyBlock} intent=${review.intent} step=${review.step} />
 
 		<div class="review-body">
 			<div class="card diff-card">
@@ -746,23 +780,51 @@ function ReviewRow({ review, showSession }) {
 		${review.auto ? html`<span class="pill">auto</span>` : null}
 		${review.revisions?.length > 1 ? html`<span class="pill accent">v${review.revisions.length}</span>` : null}
 		${review.partial ? html`<span class="pill accent">partial</span>` : null}
+		${review.status === "approved" && review.applied === true ? html`<span class="pill ok">applied</span>` : null}
+		${review.status === "approved" && review.applied === false ? html`<span class="pill bad" title=${review.applyError ?? "The agent could not apply this change"}>not applied</span>` : null}
+		<${LineStats} stats=${review.stats} />
 		<${Status} value=${review.status} />
 		<span class="tiny faint" style="width:40px;text-align:right">${timeAgo(review.createdAt)}</span>
+	</a>`;
+}
+
+export function ChangesetKind({ kind }) {
+	return html`<span class=${`tool-tag kind-${kind}`}>${kind === "turn" ? "TURN" : "BASH"}</span>`;
+}
+
+const CHANGESET_STATUS = { open: "pending", accepted: "approved", reverted: "denied", partial: "partial" };
+
+export function ChangesetStatus({ value }) {
+	return html`<span class=${`status ${CHANGESET_STATUS[value] ?? value}`}>${value === "open" ? "to review" : value}</span>`;
+}
+
+function ChangesetRow({ changeset }) {
+	const count = changeset.files?.length ?? 0;
+	return html`<a class="list-row" style=${`--c:${colorOf(changeset.sessionId)}`} href=${`#/changeset/${changeset.id}`}>
+		<span class="dot" style=${`--c:${colorOf(changeset.sessionId)}`}></span>
+		<${ChangesetKind} kind=${changeset.kind} />
+		<span class=${`ellipsis ${changeset.kind === "bash" ? "mono" : ""}`} style="flex:1" title=${changeset.title}>${changeset.title || (changeset.kind === "turn" ? "Turn changes" : "Bash changes")}</span>
+		<span class="pill">${count} file${count === 1 ? "" : "s"}</span>
+		<${LineStats} stats=${changeset.stats} />
+		<${ChangesetStatus} value=${changeset.status} />
+		<span class="tiny faint" style="width:40px;text-align:right">${timeAgo(changeset.createdAt)}</span>
 	</a>`;
 }
 
 export function ReviewsView() {
 	const state = useStore();
 	const queue = pendingReviews();
+	const changes = openChangesets();
 	const [filter, setFilter] = useState(null);
 
 	useEffect(() => {
 		const onKey = (e) => {
 			if (isTyping(e) || e.ctrlKey || e.metaKey || e.altKey) return;
-			if ((e.key === "Enter" || e.key.toLowerCase() === "o") && queue.length) {
-				e.preventDefault();
-				navigate(`#/review/${queue[0].id}`);
-			}
+			if (e.key !== "Enter" && e.key.toLowerCase() !== "o") return;
+			const first = queue[0] ? `#/review/${queue[0].id}` : changes[0] ? `#/changeset/${changes[0].id}` : null;
+			if (!first) return;
+			e.preventDefault();
+			navigate(first);
 		};
 		addEventListener("keydown", onKey);
 		return () => removeEventListener("keydown", onKey);
@@ -774,19 +836,22 @@ export function ReviewsView() {
 		list.push(r);
 		groups.set(r.sessionId, list);
 	}
-	const history = sorted(state.reviews)
-		.filter((r) => r.status !== "pending" && r.status !== "thinking")
-		.filter((r) => !filter || r.sessionId === filter)
+	const decidedReviews = sorted(state.reviews).filter((r) => r.status !== "pending" && r.status !== "thinking");
+	const decidedChanges = sorted(state.changesets).filter((c) => c.status !== "open");
+	const history = [...decidedReviews.map((item) => ({ type: "review", item })), ...decidedChanges.map((item) => ({ type: "changeset", item }))]
+		.filter((entry) => !filter || entry.item.sessionId === filter)
+		.sort((a, b) => (b.item.createdAt ?? 0) - (a.item.createdAt ?? 0))
 		.slice(0, 120);
-	const sessionIds = [...new Set(sorted(state.reviews).filter((r) => r.status !== "pending" && r.status !== "thinking").map((r) => r.sessionId))];
+	const sessionIds = [...new Set([...decidedReviews, ...decidedChanges].map((r) => r.sessionId))];
+	const waiting = queue.length + changes.length;
 
 	return html`<div class="page">
 		<div class="page-head">
 			<div>
 				<h1 class="page-title">Diff review</h1>
 				<div class="page-sub">
-					${queue.length
-						? html`${queue.length} change${queue.length === 1 ? "" : "s"} waiting on you · <kbd>Enter</kbd> opens the first`
+					${waiting
+						? html`${waiting} change${waiting === 1 ? "" : "s"} waiting on you · <kbd>Enter</kbd> opens the first`
 						: "Every edit and write from every agent is gated here. Nothing is waiting right now."}
 				</div>
 			</div>
@@ -802,14 +867,27 @@ export function ReviewsView() {
 						)}
 					</div>`
 			: null}
+		${changes.length
+			? html`<div class="row" style=${`margin:${queue.length ? "24px" : "0"} 0 10px`}>
+						<h3 class="section-title" style="margin:0">Changes to review</h3>
+						<span class="tiny faint">already on disk · keep or revert hunk by hunk</span>
+					</div>
+					<div class="card review-queue">${changes.map((c) => html`<${ChangesetRow} key=${c.id} changeset=${c} />`)}</div>`
+			: null}
 		<div class="row" style="margin:24px 0 12px">
 			<div class="section-title">History</div>
 			<span class="spacer"></span>
 			<div class="row wrap">${sessionIds.map((sid) => html`<${SessionChip} id=${sid} on=${filter === sid} onClick=${() => setFilter(filter === sid ? null : sid)} />`)}</div>
 		</div>
 		${history.length
-			? html`<div class="card" style="padding:8px">${history.map((r) => html`<${ReviewRow} key=${r.id} review=${r} showSession=${true} />`)}</div>`
-			: queue.length
+			? html`<div class="card" style="padding:8px">
+					${history.map((entry) =>
+						entry.type === "review"
+							? html`<${ReviewRow} key=${entry.item.id} review=${entry.item} showSession=${true} />`
+							: html`<${ChangesetRow} key=${entry.item.id} changeset=${entry.item} />`,
+					)}
+				</div>`
+			: waiting
 				? html`<div class="small faint">No decided reviews yet.</div>`
 				: html`<${Empty} icon="◧" title="No reviews yet">When an agent edits or writes a file, the change lands here before touching disk.<//>`}
 	</div>`;

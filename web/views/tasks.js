@@ -1,6 +1,7 @@
 import { html, useEffect, useMemo, useRef, useState } from "../vendor/preact-htm.js";
 import { api, sessionOf, sorted, useStore } from "../lib/store.js";
 import { Empty, Modal, SessionChip, colorOf, sessionName, timeAgo, useTick } from "../lib/util.js";
+import { SpawnDialog } from "./agents.js";
 
 const COLUMNS = [
 	{ status: "todo", label: "To do", icon: "○" },
@@ -251,6 +252,7 @@ function TaskEditor({ task, tasks, onClose }) {
 	const [deps, setDeps] = useState(() => new Set(task?.deps ?? []));
 	const [note, setNote] = useState("");
 	const [busy, setBusy] = useState(false);
+	const [spawning, setSpawning] = useState(false);
 	const candidates = sorted(tasks, "createdAt", false).filter((t) => t.id !== task?.id);
 
 	const toggleDep = (id) =>
@@ -289,6 +291,8 @@ function TaskEditor({ task, tasks, onClose }) {
 	};
 
 	const live = task ? (state.tasks.get(task.id) ?? task) : null;
+
+	if (spawning && live) return html`<${SpawnDialog} task=${live} onClose=${() => setSpawning(false)} />`;
 
 	return html`<div class="col" style="gap:14px">
 		<div class="row">
@@ -357,6 +361,7 @@ function TaskEditor({ task, tasks, onClose }) {
 			: null}
 		<div class="row">
 			${live ? html`<button class="btn bad" onClick=${remove}>Delete</button>` : null}
+			${live ? html`<button class="btn" title="Launch a new pi agent briefed on this task" onClick=${() => setSpawning(true)}>Spawn agent for this task</button>` : null}
 			<span class="spacer"></span>
 			<button class="btn ghost" onClick=${onClose}>Cancel</button>
 			<button class="btn primary" disabled=${busy || !title.trim()} onClick=${save}>${isNew ? "Create" : "Save"}</button>

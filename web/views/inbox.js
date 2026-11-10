@@ -1,10 +1,11 @@
 import { html, useState } from "../vendor/preact-htm.js";
 import { Icon } from "../lib/icons.js";
 import { api, sessionOf, sorted, useStore } from "../lib/store.js";
-import { Empty, Markdown, SessionChip, colorOf, navigate, timeAgo, useTick } from "../lib/util.js";
+import { Empty, LineStats, Markdown, SessionChip, colorOf, navigate, timeAgo, useTick } from "../lib/util.js";
 
 const KINDS = {
 	review: { icon: "◧", label: "Review", color: "var(--warn)" },
+	changeset: { icon: "◧", label: "Changes", color: "var(--warn)" },
 	question: { icon: "?", label: "Question", color: "var(--warn)" },
 	conflict: { icon: "⚠", label: "Conflict", color: "var(--warn)" },
 	error: { icon: "!", label: "Error", color: "var(--bad)" },
@@ -13,7 +14,7 @@ const KINDS = {
 	pr: { icon: "⑂", label: "PR", color: "var(--accent-hi)" },
 	done: { icon: "✓", label: "Done", color: "var(--ok)" },
 };
-const PRIORITY = { review: 0, question: 0, conflict: 1, error: 1, test_fail: 2, message: 2, pr: 3, done: 4 };
+const PRIORITY = { review: 0, changeset: 0, question: 0, conflict: 1, error: 1, test_fail: 2, message: 2, pr: 3, done: 4 };
 
 function QuestionAnswer({ item }) {
 	const [text, setText] = useState("");
@@ -61,6 +62,9 @@ function ReplyToAgent({ item }) {
 }
 
 function InboxItem({ item }) {
+	const state = useStore();
+	const review = item.kind === "review" || item.kind === "conflict" ? state.reviews.get(item.refId) : null;
+	const changeset = item.kind === "changeset" ? state.changesets.get(item.refId) : null;
 	const session = sessionOf(item.sessionId);
 	const kind = KINDS[item.kind] ?? { icon: "•", label: item.kind, color: "var(--ink-soft)" };
 	const open = () => item.path && navigate(item.path);
@@ -68,8 +72,8 @@ function InboxItem({ item }) {
 		e.stopPropagation();
 		api("POST", `/api/inbox/${item.id}/resolve`, {});
 	};
-	const actionable = ["review", "conflict", "test_fail", "error", "done", "pr"].includes(item.kind) && item.path && item.path !== "#/inbox";
-	const body = item.body && item.body.trim() !== item.title?.trim() ? item.body : "";
+	const actionable = ["review", "changeset", "conflict", "test_fail", "error", "done", "pr"].includes(item.kind) && item.path && item.path !== "#/inbox";
+	const body = item.body && item.body.trim() !== item.title?.trim() && changeset?.kind !== "bash" ? item.body : "";
 	return html`<div class=${`card inbox-item ${item.resolved ? "resolved" : ""}`} style=${`--c:${colorOf(session)}`}>
 		<div class="accent-bar"></div>
 		<div class="inbox-icon" style=${`color:${kind.color}`}><${Icon} name=${item.kind} size=${17} /></div>
@@ -79,8 +83,13 @@ function InboxItem({ item }) {
 				<span class="pill">${kind.label}</span>
 				<span class="tiny faint">${timeAgo(item.createdAt)}</span>
 				${item.resolved ? html`<span class="pill ok">${item.outcome ?? "resolved"}</span>` : null}
+				${review?.step ? html`<span class="tiny faint ellipsis" style="max-width:260px" title="Active plan step">▸ ${review.step}</span>` : null}
 			</div>
-			<div class="inbox-title">${item.title}</div>
+			<div class="row" style="gap:10px;align-items:baseline">
+				<div class="inbox-title">${item.title}</div>
+				${item.kind === "review" ? html`<${LineStats} stats=${review?.stats} />` : null}
+			</div>
+			${changeset?.title && changeset.kind === "bash" ? html`<code class="inbox-command">$ ${changeset.title}</code>` : null}
 			${body ? html`<${Markdown} text=${body} class="inbox-body" />` : null}
 			${item.answer ? html`<div class="small" style="margin-top:6px;color:var(--ok)">↳ ${item.answer}</div>` : null}
 			${!item.resolved && item.kind === "question" ? html`<${QuestionAnswer} item=${item} />` : null}
@@ -88,7 +97,7 @@ function InboxItem({ item }) {
 		</div>
 		<div class="inbox-actions">
 			${actionable ? html`<button class="btn sm primary" onClick=${open}>Open</button>` : null}
-			${!item.resolved && !["review", "question"].includes(item.kind) ? html`<button class="btn sm ghost" onClick=${dismiss}>Dismiss</button>` : null}
+			${!item.resolved && !["review", "question", "changeset"].includes(item.kind) ? html`<button class="btn sm ghost" onClick=${dismiss}>Dismiss</button>` : null}
 		</div>
 	</div>`;
 }

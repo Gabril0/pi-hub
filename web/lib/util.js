@@ -81,21 +81,64 @@ export function escapeHtml(text) {
 	return String(text ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 }
 
-function sanitize(markup) {
-	const template = document.createElement("template");
-	template.innerHTML = markup;
-	for (const node of template.content.querySelectorAll("script,style,iframe,object,embed,link,meta,form")) node.remove();
-	for (const node of template.content.querySelectorAll("*")) {
-		for (const attr of [...node.attributes]) {
-			const value = attr.value.trim().toLowerCase();
-			if (attr.name.startsWith("on") || ((attr.name === "href" || attr.name === "src") && value.startsWith("javascript:"))) node.removeAttribute(attr.name);
+const ALLOWED_TAGS = new Set(["P", "BR", "STRONG", "EM", "B", "I", "CODE", "PRE", "UL", "OL", "LI", "BLOCKQUOTE", "A", "H1", "H2", "H3", "H4", "TABLE", "THEAD", "TBODY", "TR", "TH", "TD", "HR", "DEL", "SPAN"]);
+const DROPPED_TAGS = new Set(["SCRIPT", "STYLE", "IFRAME", "OBJECT", "EMBED", "TEMPLATE", "NOSCRIPT", "SVG", "MATH", "TEXTAREA", "SELECT", "BUTTON", "INPUT", "LINK", "META", "BASE", "FRAME", "FRAMESET", "TITLE", "HEAD"]);
+const SAFE_PROTOCOLS = new Set(["http:", "https:", "mailto:"]);
+
+function safeHref(value) {
+	const href = value.trim();
+	if (href.startsWith("#")) return true;
+	try {
+		return SAFE_PROTOCOLS.has(new URL(href).protocol);
+	} catch {
+		return false;
+	}
+}
+
+function keepAttribute(element, attr) {
+	const tag = element.tagName;
+	if (attr.name === "title") return true;
+	if (attr.name === "href") return tag === "A" && safeHref(attr.value);
+	if (attr.name === "class") return tag === "CODE" || tag === "SPAN";
+	if (attr.name === "colspan" || attr.name === "rowspan") return (tag === "TD" || tag === "TH") && /^\d{1,3}$/.test(attr.value.trim());
+	return false;
+}
+
+function cleanChildren(parent) {
+	for (const node of [...parent.childNodes]) {
+		if (node.nodeType === Node.TEXT_NODE) continue;
+		if (node.nodeType !== Node.ELEMENT_NODE) {
+			node.remove();
+			continue;
 		}
-		if (node.tagName === "A") {
+		const tag = node.tagName.toUpperCase();
+		if (DROPPED_TAGS.has(tag)) {
+			node.remove();
+			continue;
+		}
+		cleanChildren(node);
+		if (!ALLOWED_TAGS.has(tag)) {
+			node.replaceWith(...node.childNodes);
+			continue;
+		}
+		for (const attr of [...node.attributes]) if (!keepAttribute(node, attr)) node.removeAttribute(attr.name);
+		if (tag === "A" && !node.getAttribute("href")?.startsWith("#")) {
 			node.setAttribute("target", "_blank");
-			node.setAttribute("rel", "noreferrer");
+			node.setAttribute("rel", "noreferrer noopener");
 		}
 	}
+}
+
+export function sanitize(markup) {
+	const template = document.createElement("template");
+	template.innerHTML = markup;
+	cleanChildren(template.content);
 	return template.innerHTML;
+}
+
+export function LineStats({ stats, class: cls = "" }) {
+	if (!stats || (!stats.added && !stats.removed)) return null;
+	return html`<span class=${`line-stats ${cls}`}><span class="plus">+${stats.added ?? 0}</span><span class="minus">−${stats.removed ?? 0}</span></span>`;
 }
 
 export function MonoBadge({ session, large = false }) {

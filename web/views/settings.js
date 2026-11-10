@@ -1,6 +1,7 @@
 import { html, useEffect, useState } from "../vendor/preact-htm.js";
 import { api, sorted, useStore } from "../lib/store.js";
 import { Stat, Empty, Status, Switch, colorOf, navigate, sessionName, timeAgo, useTick } from "../lib/util.js";
+import { ReviewModeToggle } from "./agents.js";
 
 const NOTIFICATION_KINDS = [
 	{ kind: "review", label: "Diff reviews" },
@@ -109,6 +110,7 @@ function SessionsTable({ sessions }) {
 					<th>Name</th>
 					<th>Working directory</th>
 					<th>Status</th>
+					<th>Review</th>
 					<th>Auto-approve edits</th>
 					<th>Last seen</th>
 					<th></th>
@@ -121,6 +123,7 @@ function SessionsTable({ sessions }) {
 						<td><${RenameCell} session=${s} /></td>
 						<td class="mono tiny ellipsis" style="max-width:280px" title=${s.cwd}>${s.cwd}</td>
 						<td><${Status} value=${s.online ? s.status : "offline"} /></td>
+						<td><${ReviewModeToggle} session=${s} showLabel=${false} /></td>
 						<td><${Switch} on=${s.trust === "auto"} onChange=${(value) => setTrust(s, value)} label=${s.trust === "auto" ? "auto" : "review"} /></td>
 						<td class="tiny faint">${s.online ? "online" : `${timeAgo(s.lastSeen)} ago`}</td>
 						<td>

@@ -61,8 +61,8 @@ function visible(line) {
 }
 
 export function diffOps(oldText, newText, { ignoreWhitespace = false } = {}) {
-	const a = splitLines(oldText);
-	const b = splitLines(newText);
+	const a = oldText === "" && newText !== "" ? [] : splitLines(oldText);
+	const b = newText === "" && oldText !== "" ? [] : splitLines(newText);
 	const normalize = ignoreWhitespace ? (s) => s.replace(/\s+/g, " ").trim() : (s) => visible(s);
 	const parts = window.Diff.diffArrays(a, b, { comparator: (x, y) => normalize(x) === normalize(y) });
 	const ops = [];
@@ -109,7 +109,7 @@ export function stats(ops) {
 	let removed = 0;
 	for (const op of ops) {
 		if (op.type === "add" && !(op.text === "" && op === ops.at(-1))) added++;
-		else if (op.type === "del") removed++;
+		else if (op.type === "del" && !(op.text === "" && op === ops.at(-1))) removed++;
 	}
 	return { added, removed };
 }

@@ -857,7 +857,8 @@ export function createHub({ port = PORT, stateFile, silent = false, openBrowserF
 			}
 		}
 		const reverted = outcomes.filter((o) => o.result.endsWith("reverted"));
-		const status = reverted.length ? (reverted.length === changeset.files.length && reverted.every((o) => o.result === "reverted") ? "reverted" : "partial") : "accepted";
+		const requested = (body.files ?? []).length;
+		const status = reverted.length ? (reverted.length === changeset.files.length && reverted.every((o) => o.result === "reverted") ? "reverted" : "partial") : requested ? "open" : "accepted";
 		store.patch("changesets", params.id, { status, outcomes, comment: body.comment, decidedAt: Date.now() });
 		resolveInbox((item) => item.refId === params.id && item.kind === "changeset", { outcome: status });
 		const lines = [];

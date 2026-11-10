@@ -14,6 +14,7 @@ const state = {
 
 const listeners = new Set();
 const inboxListeners = new Set();
+const toastListeners = new Set();
 let notifyTimer = null;
 
 function changed() {
@@ -42,6 +43,15 @@ export function useStore() {
 export function onInboxItem(listener) {
 	inboxListeners.add(listener);
 	return () => inboxListeners.delete(listener);
+}
+
+export function onToast(listener) {
+	toastListeners.add(listener);
+	return () => toastListeners.delete(listener);
+}
+
+export function toast(message) {
+	for (const listener of toastListeners) listener(message);
 }
 
 const TOKEN_KEY = "pi-hub-token";
@@ -154,6 +164,10 @@ export function sorted(map, key = "createdAt", desc = true) {
 
 export function pendingReviews() {
 	return sorted(state.reviews, "createdAt", false).filter((r) => r.status === "pending" || r.status === "thinking");
+}
+
+export function openChangesets() {
+	return sorted(state.changesets, "createdAt", false).filter((c) => c.status === "open");
 }
 
 export function openInbox() {

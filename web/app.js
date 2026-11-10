@@ -1,11 +1,12 @@
 import { html, render, useEffect, useState } from "./vendor/preact-htm.js";
-import { connect, onInboxItem, openInbox, pendingReviews, sessionOf, sorted, useStore } from "./lib/store.js";
-import { Modal, SessionChip, colorOf, isTyping, navigate, sessionName, useRoute, useTick } from "./lib/util.js";
+import { connect, onInboxItem, onToast, openChangesets, openInbox, pendingReviews, sessionOf, sorted, useStore } from "./lib/store.js";
+import { LineStats, Modal, SessionChip, colorOf, isTyping, navigate, sessionName, useRoute, useTick } from "./lib/util.js";
 import { chime } from "./lib/sound.js";
 import { Icon } from "./lib/icons.js";
 import { InboxView } from "./views/inbox.js";
 import { AgentsView, AgentDetail, SpawnDialog, BroadcastDialog } from "./views/agents.js";
 import { ReviewView, ReviewsView } from "./views/review.js";
+import { ChangesetView } from "./views/changeset.js";
 import { TestsView } from "./views/tests.js";
 import { TasksView } from "./views/tasks.js";
 import { PrsView } from "./views/prs.js";
@@ -36,12 +37,16 @@ function Clock() {
 function Toasts() {
 	const [toasts, setToasts] = useState([]);
 	const state = useStore();
+	const push = (item, ttl) => {
+		const toast = { ...item, toastId: Math.random() };
+		setToasts((list) => [...list.slice(-3), toast]);
+		setTimeout(() => setToasts((list) => list.filter((t) => t.toastId !== toast.toastId)), ttl);
+	};
+	useEffect(() => onToast((item) => push({ ...item, local: true }, 5000)), []);
 	useEffect(
 		() =>
 			onInboxItem((item) => {
-				const toast = { ...item, toastId: Math.random() };
-				setToasts((list) => [...list.slice(-3), toast]);
-				setTimeout(() => setToasts((list) => list.filter((t) => t.toastId !== toast.toastId)), 7000);
+				push(item, 7000);
 				const prefs = state.config?.notifications;
 				if (prefs?.enabled === false || prefs?.kinds?.[item.kind] === false) return;
 				if (prefs?.sound !== false) chime(item.kind);
@@ -56,17 +61,18 @@ function Toasts() {
 			}),
 		[],
 	);
-	return html`<div class="toast-stack">
-		${toasts.map((t) => {
-			const session = sessionOf(t.sessionId);
-			return html`<div class="card glossy toast" style=${`--c:${colorOf(session)}`} onClick=${() => navigate(t.path ?? "#/inbox")}>
-				<div class="accent-bar"></div>
-				<div class="row small faint"><${Icon} name=${t.kind} size=${13} /> ${session ? sessionName(session) : "hub"}</div>
-				<div style="font-weight:700;margin-top:2px">${t.title}</div>
-				${t.body ? html`<div class="small muted ellipsis">${t.body}</div>` : null}
-			</div>`;
-		})}
-	</div>`;
+	const card = (t) => {
+		const session = sessionOf(t.sessionId);
+		const dismiss = () => setToasts((list) => list.filter((x) => x.toastId !== t.toastId));
+		return html`<div class=${`card glossy toast ${t.tone ? `tone-${t.tone}` : ""}`} style=${`--c:${colorOf(session)}`} onClick=${() => (t.local ? dismiss() : navigate(t.path ?? "#/inbox"))}>
+			<div class="accent-bar"></div>
+			<div class="row small faint"><${Icon} name=${t.kind} size=${13} /> ${session ? sessionName(session) : "hub"}</div>
+			<div class="toast-title">${t.title}</div>
+			${t.body ? html`<div class="small muted ellipsis toast-body">${t.body}</div>` : null}
+		</div>`;
+	};
+	return html`<div class="toast-stack">${toasts.filter((t) => !t.local).map(card)}</div>
+		<div class="toast-stack center">${toasts.filter((t) => t.local).map(card)}</div>`;
 }
 
 function Shell() {
@@ -75,11 +81,13 @@ function Shell() {
 	const [dialog, setDialog] = useState(null);
 	const inbox = openInbox();
 	const reviews = pendingReviews();
+	const changes = openChangesets();
+	const pending = [...reviews.map((item) => ({ type: "review", item })), ...changes.map((item) => ({ type: "changeset", item }))].sort((a, b) => (a.item.createdAt ?? 0) - (b.item.createdAt ?? 0));
 	const sessions = sorted(state.sessions, "createdAt", false);
 	const online = sessions.filter((s) => s.online);
 	const failing = [...state.testRuns.values()].filter((r) => r.status === "failed" && Date.now() - (r.createdAt ?? 0) < 3600_000).length;
 	const openTasks = [...state.tasks.values()].filter((t) => t.status !== "done").length;
-	const badges = { inbox: inbox.length, reviews: reviews.length, agents: online.length, tests: failing, tasks: openTasks };
+	const badges = { inbox: inbox.length, reviews: reviews.length + changes.length, agents: online.length, tests: failing, tasks: openTasks };
 	const urgent = { inbox: true, reviews: true, tests: true };
 
 	useEffect(() => {
@@ -90,7 +98,7 @@ function Shell() {
 	useEffect(() => {
 		const onKey = (e) => {
 			if (isTyping(e) || e.ctrlKey || e.metaKey || e.altKey) return;
-			if (route.name === "review" && route.id) return;
+			if ((route.name === "review" || route.name === "changeset") && route.id) return;
 			const nav = NAV.find((n) => n.key === e.key);
 			if (nav) navigate(`#/${nav.name}`);
 		};
@@ -112,6 +120,9 @@ function Shell() {
 			break;
 		case "reviews":
 			view = html`<${ReviewsView} />`;
+			break;
+		case "changeset":
+			view = route.id ? html`<${ChangesetView} id=${route.id} key=${route.id} />` : html`<${ReviewsView} />`;
 			break;
 		case "agents":
 			view = route.id ? html`<${AgentDetail} id=${route.id} key=${route.id} />` : html`<${AgentsView} />`;
@@ -136,10 +147,12 @@ function Shell() {
 	}
 
 	if (state.authError) {
-		return html`<div class="empty" style="padding-top:20vh">
-			<div class="empty-orb">π</div>
-			<h2>Open the hub from pi</h2>
-			<p class="muted">Run <code>/hub</code> inside a pi session, or open the link with <code>?token=…</code> from <code>~/.pi/agent/hub/token</code>.</p>
+		return html`<div class="auth-screen">
+			<div class="card glossy auth-card">
+				<div class="orb auth-orb">π</div>
+				<h2>Link expired</h2>
+				<p>This dashboard link expired (the hub restarted). Run <code>/hub</code> inside pi to open a fresh one.</p>
+			</div>
 		</div>`;
 	}
 
@@ -165,19 +178,25 @@ function Shell() {
 		<nav class="rail">
 			<div class="rail-section">Mission control</div>
 			${NAV.map(
-				(item) => html`<a class=${`nav-item ${route.name === item.name || (item.name === "reviews" && route.name === "review") ? "active" : ""}`} href=${`#/${item.name}`}>
+				(item) => html`<a class=${`nav-item ${route.name === item.name || (item.name === "reviews" && (route.name === "review" || route.name === "changeset")) ? "active" : ""}`} href=${`#/${item.name}`}>
 					<span class="nav-icon"><${Icon} name=${item.icon} /></span>${item.label}
 					${badges[item.name] ? html`<span class=${`nav-badge ${urgent[item.name] ? "" : "calm"}`}>${badges[item.name]}</span>` : null}
 				</a>`,
 			)}
 			<div class="rail-section">Pending reviews</div>
-			${reviews.slice(0, 8).map(
-				(r) => html`<a class="list-row" style=${`--c:${colorOf(r.sessionId)}`} href=${`#/review/${r.id}`}>
-					<span class="dot" style=${`--c:${colorOf(r.sessionId)}`}></span>
-					<span class="ellipsis small">${r.path.split("/").pop()}</span>
-				</a>`,
-			)}
-			${reviews.length ? null : html`<div class="tiny faint" style="padding:0 6px">Nothing waiting on you ✦</div>`}
+			${pending.slice(0, 8).map(({ type, item }) => {
+				const href = type === "review" ? `#/review/${item.id}` : `#/changeset/${item.id}`;
+				const active = route.hash === href;
+				const label = type === "review" ? item.path.split("/").pop() : item.title || `${item.files?.length ?? 0} files`;
+				return html`<a class=${`list-row rail-pending ${active ? "active" : ""}`} style=${`--c:${colorOf(item.sessionId)}`} href=${href} title=${type === "review" ? item.path : item.title}>
+					<span class="dot" style=${`--c:${colorOf(item.sessionId)}`}></span>
+					${type === "changeset" ? html`<span class="rail-kind">${item.kind === "turn" ? "turn" : "$"}</span>` : null}
+					<span class=${`ellipsis small ${type === "changeset" && item.kind === "bash" ? "mono" : ""}`} style="flex:1">${label}</span>
+					<${LineStats} stats=${item.stats} class="tiny" />
+				</a>`;
+			})}
+			${pending.length > 8 ? html`<a class="tiny faint" style="padding:0 10px" href="#/reviews">+${pending.length - 8} more</a>` : null}
+			${pending.length ? null : html`<div class="tiny faint" style="padding:0 6px">Nothing waiting on you ✦</div>`}
 		</nav>
 		<main class="main">${view}</main>
 		<${Toasts} />

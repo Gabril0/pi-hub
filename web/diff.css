@@ -788,3 +788,250 @@ tr.block-head td > .row {
 .file-head > :not(.file-path) {
 	flex: none;
 }
+
+.tool-tag.del {
+	color: #ffd0d2;
+	background: #5c2a2e;
+}
+.tool-tag.kind-turn {
+	color: #cfe0ff;
+	background: #2b3f66;
+}
+.tool-tag.kind-bash {
+	color: var(--warn-ink);
+	background: #4a3a20;
+}
+
+.why-block {
+	padding: 10px 14px 10px 16px;
+	border-radius: 10px;
+	background: var(--panel);
+	box-shadow:
+		inset 3px 0 0 var(--c, var(--accent)),
+		inset 0 0 0 1px var(--border);
+}
+.why-head {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	min-height: 24px;
+}
+.why-label {
+	font: 700 11px/16px var(--font-body);
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+	color: var(--ink-faint);
+}
+.why-step {
+	max-width: 60%;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+.why-body {
+	margin-top: 4px;
+	font-size: 13.5px;
+	line-height: 20px;
+	color: var(--ink);
+}
+.why-body.clamped {
+	max-height: 80px;
+	overflow: hidden;
+}
+.why-body.faded {
+	-webkit-mask-image: linear-gradient(to bottom, #000 60%, transparent);
+	mask-image: linear-gradient(to bottom, #000 60%, transparent);
+}
+.why-body .markdown {
+	font-size: inherit;
+	line-height: inherit;
+}
+
+.cs-title-card {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	min-width: 0;
+	padding: 10px 14px;
+	border-radius: 10px;
+	background: var(--panel-lo);
+	box-shadow: inset 0 0 0 1px var(--border);
+}
+.cs-title-label {
+	flex: none;
+	font: 700 11px/16px var(--font-mono);
+	color: var(--ink-faint);
+	text-transform: uppercase;
+}
+.cs-title {
+	flex: 1;
+	min-width: 0;
+	font-size: 14px;
+	line-height: 20px;
+	color: var(--ink);
+	display: -webkit-box;
+	-webkit-line-clamp: 2;
+	-webkit-box-orient: vertical;
+	overflow: hidden;
+	word-break: break-word;
+}
+.cs-title.mono {
+	font: 600 13.5px/20px var(--font-mono);
+	color: #fff;
+}
+.cs-root {
+	flex: none;
+	max-width: 32%;
+}
+
+.cs-body {
+	flex: 1;
+	min-height: 0;
+	display: grid;
+	grid-template-columns: 300px minmax(0, 1fr);
+	gap: 16px;
+	padding-bottom: 16px;
+}
+.cs-side {
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+	min-height: 0;
+}
+.cs-files {
+	display: flex;
+	flex-direction: column;
+	min-height: 0;
+	padding: 6px;
+	flex: 1;
+}
+.cs-files-head {
+	padding: 4px 8px 6px;
+}
+.cs-file-list {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	min-height: 0;
+	overflow: auto;
+}
+.cs-file {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	width: 100%;
+	padding: 7px 8px;
+	text-align: left;
+	color: var(--ink-soft);
+	border: none;
+	border-radius: var(--r-control);
+	background: transparent;
+	cursor: pointer;
+}
+.cs-file:hover {
+	color: var(--ink);
+	background: rgba(255, 255, 255, 0.04);
+}
+.cs-file.on {
+	color: var(--ink);
+	background: rgba(59, 130, 246, 0.14);
+	box-shadow: inset 0 0 0 1px rgba(59, 130, 246, 0.3);
+}
+.cs-file-status {
+	flex: none;
+	display: grid;
+	place-items: center;
+	width: 18px;
+	height: 18px;
+	font: 700 10.5px/1 var(--font-mono);
+	border-radius: 4px;
+	color: #c6d4ee;
+	background: #34425c;
+}
+.cs-file-status.added {
+	color: #c9f5d6;
+	background: #24543a;
+}
+.cs-file-status.deleted {
+	color: #ffd0d2;
+	background: #5c2a2e;
+}
+.cs-file-name {
+	flex: 1;
+	min-width: 0;
+	display: flex;
+	flex-direction: column;
+}
+.cs-file-base {
+	overflow: hidden;
+	font: 600 12.5px/17px var(--font-mono);
+	white-space: nowrap;
+	text-overflow: ellipsis;
+}
+.cs-file-dir {
+	overflow: hidden;
+	font: 500 10.5px/14px var(--font-mono);
+	color: var(--ink-faint);
+	white-space: nowrap;
+	text-overflow: ellipsis;
+}
+.cs-file .pill {
+	padding: 0 6px;
+	font-size: 11px;
+	line-height: 16px;
+}
+.cs-decide {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+	flex: none;
+}
+.cs-decide .decision-bar {
+	display: grid;
+	grid-template-columns: 1fr 1fr;
+	gap: 8px;
+}
+.cs-outcome {
+	display: grid;
+	grid-template-columns: 7px minmax(0, 1fr);
+	align-items: center;
+	column-gap: 8px;
+	min-width: 0;
+}
+.cs-outcome-dot {
+	flex: none;
+	width: 7px;
+	height: 7px;
+	border-radius: 50%;
+	background: var(--ink-off);
+}
+.cs-outcome-dot.ok {
+	background: var(--ok-hi);
+}
+.cs-outcome-dot.warn {
+	background: var(--warn);
+}
+.cs-outcome-dot.bad {
+	background: var(--bad);
+}
+.cs-outcome-text {
+	grid-column: 2;
+	line-height: 15px;
+}
+.cs-outcome-text.ok {
+	color: var(--ok-ink);
+}
+.cs-outcome-text.warn {
+	color: var(--warn-ink);
+}
+.cs-outcome-text.bad {
+	color: var(--bad-ink);
+}
+
+@media (max-width: 1180px) {
+	.cs-body {
+		grid-template-columns: 1fr;
+	}
+	.cs-files {
+		max-height: 260px;
+	}
+}

@@ -29,7 +29,25 @@ Running several pi agents in tmux panes means constant context switching: which 
   ![Hash bump collapse](docs/screenshots/review-collapse.png)
 - **Deny with feedback.** Your draft and line comments go straight back to the agent as the reason.
 - **Trust.** Auto-approve a whole session (`/hub-trust auto`) or files matching a glob (Settings). Auto-approved changes are still logged.
-- **Conflicts.** You get a warning when two agents touch the same file.
+- **Conflicts.** You get a warning when two agents touch the same file. If a file changes on disk while its review is open, approving writes nothing and the agent is told to re-read it.
+- **The agent hears back.** Your comments, line comments and any hunks you excluded or edited are added to the tool result the agent sees, so its picture of the code matches what's on disk.
+- **Intent next to the diff.** Each review shows what the agent said it was doing when it proposed the change, plus +/− counts in the queue and inbox.
+
+### Changesets: bash writes and per-turn review
+
+The gate catches `edit` and `write`. Everything else is caught by git snapshots:
+
+- **Bash writes.** Before and after every `bash` call that isn't obviously read-only, the extension snapshots the working tree into a temporary git index, so your real index is never touched. Files the command created, changed or deleted show up as a **changeset** you can keep, or revert per file or per hunk. Reverts are only written if the file still matches what the command left, and the agent is told what you reverted.
+- **Checkpoint mode.** Approving every edit doesn't scale past a couple of agents. Use `/hub-mode checkpoint` or the "Review: per turn" switch to let an agent edit freely; when its turn ends, everything it changed arrives as one multi-file changeset.
+
+![Changeset](docs/screenshots/changeset.png)
+
+Changesets need the agent's working directory to be a git repository.
+
+### Multi-agent coordination
+
+- **Spawn in a worktree.** "New agent" can create a `git worktree` on a fresh `agent/<name>` branch, then pick the model, review mode and trust, and link a task. "Spawn agent for this task" does it from the task editor. Spawn settings are applied by the hub when the new session registers, so an agent can't fake them.
+- **Shared context.** At the start of every prompt each agent gets a short system-prompt section listing the other agents, their tasks and the files they currently have in progress, with a nudge to coordinate through `hub_message` and `hub_tasks`.
 - Keyboard: `a` approve · `d` deny · `j`/`k` next/previous change · `x` include/exclude · `n`/`p` next/previous review · `s` split · `w` wrap · `c` chat · `?` help.
 
 ### Agents and inbox
@@ -108,6 +126,7 @@ sequenceDiagram
 | `/hub` | Open the dashboard |
 | `/hub-gate on\|off` | Toggle the review gate for this session |
 | `/hub-trust auto\|review` | Auto-approve this session's changes, or go back to reviewing them |
+| `/hub-mode gate\|checkpoint` | Approve each edit, or review each turn as one changeset |
 
 ## Platforms
 
@@ -129,15 +148,21 @@ sequenceDiagram
 
 Everything else (notification kinds, auto-approve globs, summaries, PR polling, the command used to spawn agents) lives in **Settings** and is saved to `~/.pi/agent/hub/config.json`.
 
-**Security.** The hub only listens on `127.0.0.1`. Every API call needs the random token in `~/.pi/agent/hub/token`: the extension sends it as a header, and `/hub` hands it to the dashboard, which keeps it in that origin's localStorage. There are no cookies, so other localhost apps can't use it. State-changing requests from other origins are rejected.
+**Security.**
+- The hub only listens on `127.0.0.1`, rejects unexpected `Host` headers (DNS rebinding) and rejects state-changing requests from other origins.
+- There are two tokens:
+  - The **agent token** in `~/.pi/agent/hub/token` only allows what an agent needs: register, report events, create reviews and changesets, answer review chat, ask questions, send messages, use tasks.
+  - The **human token** lives only in the hub's memory and is handed to your browser when `/hub` opens the dashboard. Approving or denying, trust, review mode, config, running commands, spawning agents and messaging agents all require it.
+- Because of this split, an agent with shell access can read its own token but cannot approve its own changes. The human token rotates on every hub restart; if the dashboard says the link expired, run `/hub` again.
+- Rendered agent output goes through an allowlist sanitizer.
 
 ## Status
 
 - ✅ **Real pi CLI:** `npm run smoke` drives the actual `pi` binary with the extension and a scripted model. The edit is held, approved through the hub, then applied.
-- ✅ **26 automated tests:** approve, partial approve, deny with line comments, ask, revise in place, trust mode, hub restart mid-review, test parsers, security checks.
+- ✅ **30 automated tests:** approve, partial approve, deny with line comments, approval notes reaching the agent, stale-file guard, ask, revise in place, trust mode, hub restart mid-review, bash changesets with revert, checkpoint mode, agent-token permission limits, test parsers, security checks.
 - ⚠️ **Not yet battle-tested** with long real-world sessions on every platform. Bug reports are welcome.
 - **Known limits:**
-  - Changes made through `bash` (`sed -i`, codegen) are not gated. The command still appears in the timeline.
+  - Changes made through `bash` are reviewed after the command runs (as a revertable changeset), not blocked before it. Outside a git repository they are not tracked.
   - The hub covers agents on one machine.
   - "Request change" uses an extra call to the session's model, which costs tokens.
 

@@ -1,5 +1,5 @@
 import { html, useEffect, useState } from "../vendor/preact-htm.js";
-import { api, loadEvents, sessionOf, sorted, useStore } from "../lib/store.js";
+import { api, loadEvents, sessionOf, sorted, toast, useStore } from "../lib/store.js";
 import { Empty, Stat, Markdown, MonoBadge, SessionChip, Status, Switch, clock, colorOf, compact, duration, money, navigate, sessionName, timeAgo, useTick } from "../lib/util.js";
 import { SessionChanges } from "./review.js";
 
@@ -10,6 +10,7 @@ const TL_ICONS = {
 	tool: "⚙",
 	tool_error: "✗",
 	review: "◧",
+	changeset: "⧉",
 	progress: "☰",
 	summary: "✦",
 	test: "✓",
@@ -19,6 +20,25 @@ const TL_ICONS = {
 	message_out: "⇢",
 	error: "!",
 };
+
+const REVIEW_MODES = [
+	{ mode: "gate", label: "per edit", title: "Approve each edit before it touches disk" },
+	{ mode: "checkpoint", label: "per turn", title: "The agent edits freely; each turn is reviewed as one changeset" },
+];
+
+export function ReviewModeToggle({ session, showLabel = true }) {
+	const current = session.reviewMode === "checkpoint" ? "checkpoint" : "gate";
+	const choose = (mode) => {
+		if (mode === current) return;
+		api("POST", `/api/sessions/${encodeURIComponent(session.id)}/mode`, { mode }).catch((error) => toast({ kind: "error", sessionId: session.id, tone: "bad", title: "Could not change review mode", body: error.message }));
+	};
+	return html`<div class="row review-mode" style="gap:8px">
+		${showLabel ? html`<span class="small muted">Review</span>` : null}
+		<div class="segmented">
+			${REVIEW_MODES.map((m) => html`<button class=${current === m.mode ? "on" : ""} title=${m.title} onClick=${() => choose(m.mode)}>${m.label}</button>`)}
+		</div>
+	</div>`;
+}
 
 function contextPercent(session) {
 	const pct = session.context?.percent;
@@ -84,6 +104,7 @@ function AgentCard({ session }) {
 			${session.model ? html`<span class="ellipsis" style="max-width:180px">◆ ${session.model.split("/").pop()}</span>` : null}
 			${session.tmuxPane ? html`<span title="tmux pane">▣ pane ${session.tmuxPane}</span>` : null}
 			${session.trust === "auto" ? html`<span class="pill warn">auto-approve</span>` : null}
+			${session.reviewMode === "checkpoint" ? html`<span class="pill accent" title="Each turn is reviewed as one changeset">checkpoint</span>` : null}
 		</div>
 		${reviews.length || questions.length
 			? html`<div class="row wrap agent-pills">
@@ -161,7 +182,7 @@ function Timeline({ sessionId }) {
 		loadEvents(sessionId);
 	}, [sessionId]);
 	const events = state.events.get(sessionId) ?? [];
-	const groups = { all: null, talk: ["agent_start", "agent_end", "assistant", "message_in", "message_out", "question", "answer", "summary"], tools: ["tool", "tool_error", "review", "test"] };
+	const groups = { all: null, talk: ["agent_start", "agent_end", "assistant", "message_in", "message_out", "question", "answer", "summary"], tools: ["tool", "tool_error", "review", "changeset", "test"] };
 	const shown = events.filter((e) => !groups[filter] || groups[filter].includes(e.kind)).slice(-300).reverse();
 	return html`<div class="card">
 		<div class="row" style="margin-bottom:10px">
@@ -180,6 +201,7 @@ function Timeline({ sessionId }) {
 							<span class="tl-text">
 								${e.toolName ? html`<b style="color:var(--ink)">${e.toolName}</b> ` : null}${e.text}
 								${e.reviewId ? html` <a href=${`#/review/${e.reviewId}`}>open</a>` : null}
+								${e.changesetId ? html` <a href=${`#/changeset/${e.changesetId}`}>open</a>` : null}
 								${e.testRunId ? html` <a href=${`#/tests/${e.testRunId}`}>open</a>` : null}
 							</span>
 						</div>`,
@@ -227,6 +249,9 @@ function Controls({ session }) {
 			<button class="btn sm" disabled=${!session.online} onClick=${() => api("POST", `/api/sessions/${id}/focus`)}>⤢ Jump to pane</button>
 			<button class="btn sm" disabled=${!session.online} onClick=${() => api("POST", `/api/sessions/${id}/summarize`)}>✦ Summarize</button>
 			<button class="btn sm bad" disabled=${!session.online || session.status !== "working"} onClick=${() => api("POST", `/api/sessions/${id}/abort`)}>■ Stop</button>
+		</div>
+		<div class="row wrap" style="gap:16px">
+			<${ReviewModeToggle} session=${session} />
 		</div>
 		<div class="row wrap" style="gap:16px">
 			<${Switch} on=${session.trust === "auto"} label="Auto-approve this agent's changes" onChange=${(on) => api("POST", `/api/sessions/${id}/trust`, { mode: on ? "auto" : "review" })} />
@@ -327,37 +352,84 @@ export function AgentDetail({ id }) {
 	</div>`;
 }
 
-export function SpawnDialog({ onClose }) {
+export function recentCwds(state) {
+	return [...new Set(sorted(state.sessions, "lastSeen").map((s) => s.cwd).filter(Boolean))].slice(0, 8);
+}
+
+export function SpawnDialog({ onClose, task }) {
 	const state = useStore();
-	const recent = [...new Set(sorted(state.sessions, "lastSeen").map((s) => s.cwd).filter(Boolean))].slice(0, 8);
+	const recent = recentCwds(state);
 	const [cwd, setCwd] = useState(recent[0] ?? "");
 	const [prompt, setPrompt] = useState("");
 	const [name, setName] = useState("");
+	const [worktree, setWorktree] = useState(true);
+	const [model, setModel] = useState("");
+	const [mode, setMode] = useState("gate");
+	const [autoApprove, setAutoApprove] = useState(false);
 	const [result, setResult] = useState(null);
 	const [busy, setBusy] = useState(false);
 	const spawn = async () => {
 		setBusy(true);
+		setResult(null);
 		try {
-			const res = await api("POST", "/api/spawn", { cwd, prompt, name });
-			setResult(res.ok ? `Launched via ${res.via}. It will appear here once pi connects.` : `Launch failed (${res.via}).`);
-			if (res.ok) setTimeout(onClose, 1600);
+			const res = await api("POST", "/api/spawn", {
+				cwd: cwd.trim(),
+				prompt,
+				name,
+				worktree,
+				model: model.trim() || undefined,
+				trust: autoApprove ? "auto" : "review",
+				mode,
+				taskId: task?.id,
+			});
+			setResult({ ...res, error: res.ok ? undefined : `Launch failed (${res.via}).` });
 		} catch (error) {
-			setResult(error.message);
+			setResult({ error: error.message });
 		} finally {
 			setBusy(false);
 		}
 	};
+	const launched = result?.ok;
 	return html`<div class="col" style="gap:14px">
-		<h2>New agent</h2>
+		<div>
+			<h2>${task ? "Spawn agent for task" : "New agent"}</h2>
+			${task ? html`<div class="small muted ellipsis" style="margin-top:4px">${task.title || "(untitled)"}</div>` : null}
+		</div>
 		<label class="field">Working directory
 			<input class="input mono" value=${cwd} onInput=${(e) => setCwd(e.target.value)} placeholder="/absolute/path/to/repo" list="recent-cwds" />
 			<datalist id="recent-cwds">${recent.map((c) => html`<option value=${c} />`)}</datalist>
 		</label>
-		<label class="field">Window name (optional)<input class="input" value=${name} onInput=${(e) => setName(e.target.value)} placeholder="e.g. listener-fix" /></label>
-		<label class="field">First prompt (optional)<textarea class="input" rows="4" value=${prompt} onInput=${(e) => setPrompt(e.target.value)} placeholder="What should this agent do?"></textarea></label>
+		<div class="row" style="gap:12px;align-items:flex-start">
+			<label class="field" style="flex:1">Window name (optional)<input class="input" value=${name} onInput=${(e) => setName(e.target.value)} placeholder=${task?.title || "e.g. listener-fix"} /></label>
+			<label class="field" style="flex:1.3">Model<input class="input mono" value=${model} onInput=${(e) => setModel(e.target.value)} placeholder="anthropic/claude-opus-5-5 (optional)" /></label>
+		</div>
+		<label class="field">First prompt (optional)<textarea class="input" rows="4" value=${prompt} onInput=${(e) => setPrompt(e.target.value)} placeholder=${task ? "Leave empty to have the hub brief the agent from the task." : "What should this agent do?"}></textarea></label>
+		<div class="well spawn-options">
+			<${Switch} on=${worktree} onChange=${setWorktree} label="Isolate in a git worktree" />
+			<div class="tiny faint spawn-hint">Creates a fresh branch and checkout next to the repo so this agent can't collide with others.</div>
+			<div class="row" style="gap:10px">
+				<span class="small">Review</span>
+				<div class="segmented">
+					${REVIEW_MODES.map((m) => html`<button class=${mode === m.mode ? "on" : ""} title=${m.title} onClick=${() => setMode(m.mode)}>${m.label}</button>`)}
+				</div>
+			</div>
+			<${Switch} on=${autoApprove} onChange=${setAutoApprove} label="Auto-approve this agent's changes" />
+		</div>
 		<div class="small muted">Opens a new tmux window when tmux is running, otherwise a new terminal window (Ghostty / Windows Terminal / your Linux terminal).</div>
-		${result ? html`<div class="well small">${result}</div>` : null}
-		<div class="row"><span class="spacer"></span><button class="btn ghost" onClick=${onClose}>Cancel</button><button class="btn primary" disabled=${busy || !cwd.trim()} onClick=${spawn}>Launch</button></div>
+		${result?.error ? html`<div class="well small spawn-result bad">${result.error}</div>` : null}
+		${launched
+			? html`<div class="well small spawn-result ok">
+					<div>Launched via ${result.via}. It will appear here once pi connects.</div>
+					${result.branch ? html`<div class="row" style="gap:8px;margin-top:6px"><span class="faint">branch</span><span class="branch">${result.branch}</span></div>` : null}
+					${result.cwd ? html`<div class="row" style="gap:8px;margin-top:4px;min-width:0"><span class="faint">${result.branch ? "worktree" : "cwd"}</span><span class="mono tiny ellipsis" title=${result.cwd}>${result.cwd}</span></div>` : null}
+				</div>`
+			: null}
+		<div class="row">
+			<span class="spacer"></span>
+			${launched
+				? html`<button class="btn primary" onClick=${onClose}>Done</button>`
+				: html`<button class="btn ghost" onClick=${onClose}>Cancel</button><button class="btn primary" disabled=${busy || !cwd.trim()} onClick=${spawn}>${busy ? "Launching…" : "Launch"}</button>`}
+		</div>
 	</div>`;
 }
 
