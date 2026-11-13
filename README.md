@@ -70,6 +70,8 @@ Changesets need the agent's working directory to be a git repository.
 - **Pull requests.** Uses `gh` to show checks, review decision and mergeability for each agent's branch. PR links an agent writes in a reply, a tool call or `bash` output (for example after `gh pr create`) are watched too, even in other repositories, and so is anything added with `hub_watch_pr`.
 - **Results.** A searchable archive of every run's final answer.
 
+![Pull requests](docs/screenshots/prs.png)
+
 ## Install
 
 Requires **Node ≥ 20.6** and **pi** (`@mariozechner/pi-coding-agent`). There are no runtime dependencies to install: the hub is plain Node and the UI libraries are vendored.
