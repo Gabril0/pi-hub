@@ -6,8 +6,9 @@ import { Type } from "typebox";
 import { buildProposal, changedSinceProposal, diffStats, type Proposal, rewriteInputForContent } from "./edits";
 import { type ChannelMessage, HubClient } from "./hub-client";
 import { diffSnapshots, isReadOnlyCommand, type Snapshot, takeSnapshot } from "./snapshot";
-import { answerReviewQuestion, formatLineComments, type LineComment, reviseProposal, summarizeSession } from "./llm";
+import { converseAboutProposal, formatLineComments, type LineComment, reviseProposal, summarizeSession } from "./llm";
 import { isTestCommand } from "../hub/test-parsers.mjs";
+import { parsePrRefs, prKey } from "../hub/github.mjs";
 
 interface PendingReview {
 	id: string;
@@ -128,6 +129,8 @@ export default function piHub(pi: ExtensionAPI) {
 	let channelStarted = false;
 	let summaryConfig = { onAgentEnd: true, minTurns: 3 };
 	let runTurns = 0;
+	let workspaceSlot: { ordinal: number; of: number } | null = null;
+	const watchedPrKeys = new Set<string>();
 
 	const client = new HubClient(id, (message) => handleChannel(message), async () => resync());
 
@@ -166,7 +169,8 @@ export default function piHub(pi: ExtensionAPI) {
 		const pending = pendingReviews.size ? ` · ${pendingReviews.size} review${pendingReviews.size > 1 ? "s" : ""} pending` : "";
 		const mode = !gateEnabled ? " · gate off" : trust === "auto" ? " · auto-approve" : reviewMode === "checkpoint" ? " · checkpoint" : "";
 		const link = client.connected ? "" : " · offline";
-		ctx.ui.setStatus("pi-hub", `${dot} hub ${color?.name ?? ""}${mode}${pending}${link}`);
+		const slot = workspaceSlot ? ` #${workspaceSlot.ordinal}/${workspaceSlot.of}` : "";
+		ctx.ui.setStatus("pi-hub", `${dot} hub ${color?.name ?? ""}${slot}${mode}${pending}${link}`);
 	}
 
 	async function register() {
@@ -177,8 +181,10 @@ export default function piHub(pi: ExtensionAPI) {
 		} catch {
 			return;
 		}
-		const { session } = await client.post("/api/sessions/register", info);
+		const { session, workspaceSlot: slot } = await client.post("/api/sessions/register", info);
 		color = session.color;
+		workspaceSlot = slot ?? null;
+		for (const ref of session.watchedPRs ?? []) watchedPrKeys.add(prKey(ref));
 		trust = session.trust ?? "review";
 		if (session.reviewMode === "checkpoint" || session.reviewMode === "gate") reviewMode = session.reviewMode;
 		try {
@@ -265,10 +271,21 @@ export default function piHub(pi: ExtensionAPI) {
 				pending.chat.push({ role: "agent", text: revision.note });
 				await client.post(`/api/reviews/${message.reviewId}/revision`, { content: revision.content, note: revision.note });
 			} else {
-				const answer = await answerReviewQuestion(pending.ctx, reviewContext, message.text, message.lineComments ?? [], signal);
+				const reply = await converseAboutProposal(pending.ctx, reviewContext, message.text, message.lineComments ?? [], signal);
 				if (signal.aborted) return;
-				pending.chat.push({ role: "agent", text: answer });
-				await client.post(`/api/reviews/${message.reviewId}/chat`, { role: "agent", text: answer });
+				if (reply.kind === "revision" && pending.proposal.snippetOnly) {
+					await client.post(`/api/reviews/${message.reviewId}/chat`, { role: "system", text: "This preview only shows the edit snippets, so it can't be edited in place. Deny with your feedback and the agent will redo the change." });
+				} else if (reply.kind === "revision" && reply.content === pending.latest) {
+					pending.chat.push({ role: "agent", text: reply.note });
+					await client.post(`/api/reviews/${message.reviewId}/chat`, { role: "agent", text: `${reply.note}\n\n_(The file came out identical, so no new version was made.)_` });
+				} else if (reply.kind === "revision") {
+					pending.latest = reply.content;
+					pending.chat.push({ role: "agent", text: reply.note });
+					await client.post(`/api/reviews/${message.reviewId}/revision`, { content: reply.content, note: reply.note });
+				} else {
+					pending.chat.push({ role: "agent", text: reply.text });
+					await client.post(`/api/reviews/${message.reviewId}/chat`, { role: "agent", text: reply.text });
+				}
 			}
 		} catch (error: any) {
 			if (signal.aborted) return;
@@ -358,6 +375,10 @@ export default function piHub(pi: ExtensionAPI) {
 			case "rename":
 				pi.setSessionName(message.name);
 				break;
+			case "workspace_slot":
+				workspaceSlot = message.slot ?? null;
+				renderStatus();
+				break;
 		}
 	}
 
@@ -439,7 +460,10 @@ export default function piHub(pi: ExtensionAPI) {
 		const message: any = event.message;
 		if (message?.role !== "assistant") return;
 		const text = textOf(message.content);
-		if (text.trim()) client.event({ kind: "assistant", text });
+		if (text.trim()) {
+			client.event({ kind: "assistant", text });
+			void watchPrsIn(text).catch(() => {});
+		}
 		const usage = message.usage;
 		if (usage) {
 			client.event({ kind: "usage", cost: usage.cost?.total ?? 0, input: usage.input ?? 0, output: usage.output ?? 0, cacheRead: usage.cacheRead ?? 0, cacheWrite: usage.cacheWrite ?? 0 });
@@ -516,8 +540,30 @@ export default function piHub(pi: ExtensionAPI) {
 		return undefined;
 	}
 
+	async function watchPrsIn(text: string, short = false): Promise<Array<{ repo: string; number: number }>> {
+		const refs = parsePrRefs(text, { short }).filter((ref) => !watchedPrKeys.has(prKey(ref)));
+		if (!refs.length) return [];
+		for (const ref of refs) watchedPrKeys.add(prKey(ref));
+		try {
+			const result = await client.post(`/api/sessions/${encodeURIComponent(id)}/watch-prs`, { refs });
+			return result.added ?? [];
+		} catch (error) {
+			for (const ref of refs) watchedPrKeys.delete(prKey(ref));
+			throw error;
+		}
+	}
+
+	function inputText(input: unknown): string {
+		try {
+			return JSON.stringify(input ?? {});
+		} catch {
+			return "";
+		}
+	}
+
 	pi.on("tool_call", async (event, ctx) => {
 		latestCtx = ctx;
+		void watchPrsIn(inputText(event.input)).catch(() => {});
 		if (gateEnabled && reviewMode === "gate" && event.toolName === "bash") {
 			const command = String((event.input as any)?.command ?? "");
 			if (!isReadOnlyCommand(command)) {
@@ -601,6 +647,7 @@ export default function piHub(pi: ExtensionAPI) {
 			const after = before ? await takeSnapshot(ctx.cwd).catch(() => undefined) : undefined;
 			if (before && after) void reportChanges(before, ctx.cwd, "bash", String((event.input as any)?.command ?? ""), after);
 		}
+		if (event.toolName === "bash" && !event.isError) void watchPrsIn(textOf(event.content)).catch(() => {});
 		if (event.toolName === "bash" && isTestCommand((event.input as any)?.command)) {
 			const output = textOf(event.content);
 			const commandExit = output.match(/Command exited with code (\d+)\s*$/i);
@@ -667,6 +714,25 @@ export default function piHub(pi: ExtensionAPI) {
 			client.event({ kind: "progress", steps: params.steps, note: params.note });
 			const done = params.steps.filter((s) => s.status === "done").length;
 			return { content: [{ type: "text", text: `Progress recorded (${done}/${params.steps.length}).` }], details: {} };
+		},
+	});
+
+	pi.registerTool({
+		name: "hub_watch_pr",
+		label: "Watch PR",
+		description:
+			"Track GitHub pull requests in the pi hub dashboard (checks, review decision, mergeability), including PRs in repositories other than your working directory. Accepts PR URLs or owner/repo#123 refs. PR links that appear in your replies, tool calls or bash output are tracked automatically.",
+		parameters: Type.Object({
+			refs: Type.Array(Type.String({ description: "PR URL or owner/repo#number" })),
+		}),
+		async execute(_toolCallId, params): Promise<any> {
+			const joined = params.refs.join(" ");
+			const requested = parsePrRefs(joined, { short: true });
+			if (!requested.length) return { content: [{ type: "text", text: "No valid PR references. Use a github.com/owner/repo/pull/N URL or owner/repo#N." }], details: {}, isError: true };
+			const added = await watchPrsIn(joined, true);
+			const already = requested.length - added.length;
+			const text = [added.length ? `Now watching ${added.map((r) => `${r.repo}#${r.number}`).join(", ")}.` : "", already ? `${already} already watched.` : ""].filter(Boolean).join(" ");
+			return { content: [{ type: "text", text }], details: { added } };
 		},
 	});
 

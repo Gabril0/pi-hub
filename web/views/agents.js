@@ -1,6 +1,6 @@
 import { html, useEffect, useState } from "../vendor/preact-htm.js";
 import { api, loadEvents, sessionOf, sorted, toast, useStore } from "../lib/store.js";
-import { Empty, Stat, Markdown, MonoBadge, SessionChip, Status, Switch, clock, colorOf, compact, duration, money, navigate, sessionName, timeAgo, useTick } from "../lib/util.js";
+import { Empty, Stat, Markdown, MonoBadge, SessionChip, Status, Switch, baseName, clock, colorOf, compact, duration, money, navigate, sessionName, timeAgo, useTick, workspaceOf } from "../lib/util.js";
 import { SessionChanges } from "./review.js";
 
 const TL_ICONS = {
@@ -150,22 +150,89 @@ export function AgentsView() {
 	const totalCost = sessions.reduce((sum, s) => sum + (s.usage?.cost ?? 0), 0);
 	const working = online.filter((s) => s.status === "working").length;
 	const waiting = online.filter((s) => s.status === "waiting").length;
+	const discovered = useWorkspaces(online.length);
+	const groups = workspaceGroups(online, discovered);
+	const unconnected = groups.reduce((n, g) => n + g.unconnected.length, 0);
 	return html`<div class="page">
 		<div class="page-head">
 			<div>
 				<h1 class="page-title">Agents</h1>
-				<div class="page-sub">${online.length} online · ${working} working · ${waiting} waiting on you · ${money(totalCost)} total</div>
+				<div class="page-sub">${online.length} online · ${working} working · ${waiting} waiting on you${unconnected ? html` · <span class="warn-text">${unconnected} not connected</span>` : ""} · ${money(totalCost)} total</div>
 			</div>
 			<div class="spacer"></div>
 			<button class=${`btn sm ${showOffline ? "pressed" : ""}`} onClick=${() => setShowOffline(!showOffline)}>Offline (${offline.length})</button>
 		</div>
-		${online.length
-			? html`<div class="grid cards">${online.map((s) => html`<${AgentCard} key=${s.id} session=${s} />`)}</div>`
+		${groups.length
+			? groups.map((g) => html`<${WorkspaceGroup} key=${g.key} group=${g} />`)
 			: html`<${Empty} icon="◉" title="No agents connected">Start <code>pi</code> with the pi-hub extension installed, or spawn one with “New agent”.<//>`}
 		${showOffline && offline.length
 			? html`<h3 class="muted" style="margin:28px 0 12px">Offline</h3>
 				<div class="grid cards">${offline.map((s) => html`<${AgentCard} key=${s.id} session=${s} />`)}</div>`
 			: null}
+	</div>`;
+}
+
+function useWorkspaces(onlineCount) {
+	const [data, setData] = useState(null);
+	useEffect(() => {
+		let alive = true;
+		const load = () => api("GET", "/api/workspaces").then((d) => alive && setData(d)).catch(() => {});
+		load();
+		const timer = setInterval(load, 10000);
+		return () => {
+			alive = false;
+			clearInterval(timer);
+		};
+	}, [onlineCount]);
+	return data;
+}
+
+function workspaceGroups(online, discovered) {
+	const groups = new Map();
+	const ensure = (key, path) => {
+		if (!groups.has(key)) groups.set(key, { key, path, title: String(path ?? key).split(/[\\/]/).filter(Boolean).pop() ?? key, sessions: [], unconnected: [] });
+		return groups.get(key);
+	};
+	for (const session of online) ensure(workspaceOf(session), session.repoRoot || session.cwd).sessions.push(session);
+	for (const workspace of discovered?.workspaces ?? []) {
+		if (!workspace.unconnected?.length) continue;
+		const match = [...groups.values()].find((g) => g.sessions.some((s) => workspace.sessions?.some((w) => w.id === s.id)));
+		(match ?? ensure(workspace.key, workspace.path)).unconnected.push(...workspace.unconnected);
+	}
+	return [...groups.values()].sort((a, b) => b.sessions.length + b.unconnected.length - (a.sessions.length + a.unconnected.length) || a.title.localeCompare(b.title));
+}
+
+function WorkspaceGroup({ group }) {
+	const count = group.sessions.length + group.unconnected.length;
+	return html`<section class="workspace">
+		<div class="workspace-head">
+			<span class="workspace-title">⌂ ${group.title}</span>
+			<span class="pill">${count} agent${count === 1 ? "" : "s"}</span>
+			${group.unconnected.length ? html`<span class="pill warn">${group.unconnected.length} not connected</span>` : null}
+			<span class="workspace-path mono tiny faint ellipsis" title=${group.path ?? ""}>${group.path ?? ""}</span>
+		</div>
+		<div class="grid cards">
+			${group.sessions.map((s) => html`<${AgentCard} key=${s.id} session=${s} />`)}
+			${group.unconnected.map((p) => html`<${UnconnectedAgent} key=${p.pid} proc=${p} />`)}
+		</div>
+	</section>`;
+}
+
+function UnconnectedAgent({ proc }) {
+	return html`<div class="card agent-card unconnected">
+		<div class="row">
+			<span class="mono-badge lg dim" style="--c:var(--warn)">π</span>
+			<span class="agent-name">pi · pid ${proc.pid}</span>
+			<span class="spacer"></span>
+			<span class="status waiting">not connected</span>
+		</div>
+		<div class="agent-meta">
+			${proc.tmuxLocation ? html`<span title="tmux location">▣ ${proc.tmuxLocation}</span>` : null}
+			${proc.tmuxPane ? html`<span title="tmux pane">pane ${proc.tmuxPane}</span>` : null}
+			${proc.startedAt ? html`<span>started ${timeAgo(proc.startedAt)} ago</span>` : null}
+		</div>
+		<div class="well small muted">This pi is running without the hub extension loaded. Run <code>/reload</code> in that pane (or restart it) to connect it.</div>
+		<div class="tiny faint mono ellipsis" title=${proc.cwd ?? ""}>${proc.cwd ?? ""}</div>
 	</div>`;
 }
 
@@ -215,7 +282,7 @@ function Controls({ session }) {
 	const [text, setText] = useState("");
 	const [mode, setMode] = useState("steer");
 	const [renaming, setRenaming] = useState(false);
-	const [name, setName] = useState(sessionName(session));
+	const [name, setName] = useState(baseName(session));
 	const [note, setNote] = useState("");
 	const id = encodeURIComponent(session.id);
 	const send = async () => {

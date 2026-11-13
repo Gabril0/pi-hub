@@ -5,7 +5,7 @@ import { notifyCommand, windowsToastScript } from "../hub/notify.mjs";
 import { globToRegExp, matchesAutoApprove } from "../hub/server.mjs";
 import { spawnPlan } from "../hub/terminal.mjs";
 import { compareRuns, flakyTests, isTestCommand, parseTestOutput } from "../hub/test-parsers.mjs";
-import { summarizeChecks } from "../hub/github.mjs";
+import { isPrRef, parsePrRefs, summarizeChecks, toPr } from "../hub/github.mjs";
 
 test("cargo output parses tests and failure bodies", () => {
 	const out = "test a::ok_one ... ok\ntest a::bad ... FAILED\ntest a::skip ... ignored\n\nfailures:\n\n---- a::bad stdout ----\npanicked at x\n\nfailures:\n    a::bad\n\ntest result: FAILED. 1 passed; 1 failed; 1 ignored; 0 measured\n";
@@ -121,5 +121,78 @@ test("hub survives malformed URLs and rejects cross-origin writes", async () => 
 	const { request } = await import("node:http");
 	const rebound = await new Promise((resolve) => request({ host: "127.0.0.1", port, path: "/api/health", headers: { host: "evil.example" } }, (res) => resolve(res.statusCode)).end());
 	assert.equal(rebound, 421);
+	await hub.close();
+});
+
+test("parsePrRefs extracts and dedups PR links but skips issues", () => {
+	const text = "see https://github.com/acme/api/pull/12, again https://github.com/acme/api/pull/12 and https://github.com/acme/web/issues/3 plus http://github.com/acme/web/pull/7/files";
+	assert.deepEqual(parsePrRefs(text), [{ repo: "acme/api", number: 12 }, { repo: "acme/web", number: 7 }]);
+	assert.deepEqual(parsePrRefs("fix acme/api#5 and acme/api#5"), []);
+	assert.deepEqual(parsePrRefs("fix acme/api#5 and acme/api#5", { short: true }), [{ repo: "acme/api", number: 5 }]);
+});
+
+test("isPrRef rejects injection attempts and bad numbers", () => {
+	assert.equal(isPrRef({ repo: "acme/api", number: 3 }), true);
+	assert.equal(isPrRef({ repo: "acme/x; rm -rf /", number: 3 }), false);
+	assert.equal(isPrRef({ repo: "acme", number: 3 }), false);
+	assert.equal(isPrRef({ repo: "acme/api", number: 0 }), false);
+	assert.equal(isPrRef({ repo: "acme/api", number: 1.5 }), false);
+	assert.equal(isPrRef({ repo: "acme/api", number: "3" }), false);
+	assert.equal(isPrRef(null), false);
+});
+
+test("toPr keeps the repo the request was made for", () => {
+	const pr = toPr({ number: 9, title: "t", url: "u", state: "OPEN", reviewDecision: "", statusCheckRollup: [] }, "other-org/lib");
+	assert.equal(pr.repo, "other-org/lib");
+	assert.equal(pr.id, "pr_other-org/lib#9");
+	assert.equal(pr.reviewDecision, "NONE");
+	assert.equal(pr.checksState, "none");
+});
+
+test("sessions sharing a workspace get ordinal slots", async () => {
+	const { createHub } = await import("../hub/server.mjs");
+	const { mkdtempSync } = await import("node:fs");
+	const { tmpdir } = await import("node:os");
+	const { join } = await import("node:path");
+	const dir = mkdtempSync(join(tmpdir(), "hub-slot-"));
+	const hub = createHub({ port: 0, stateFile: join(dir, "state.json"), silent: true });
+	const port = await hub.listen();
+	const register = async (id, cwd) => (await fetch(`http://127.0.0.1:${port}/api/sessions/register`, { method: "POST", headers: { "x-hub-token": hub.token, "content-type": "application/json" }, body: JSON.stringify({ id, cwd, repoRoot: cwd }) })).json();
+	const first = await register("a", join(dir, "repo"));
+	assert.equal(first.workspaceSlot, null);
+	await new Promise((r) => setTimeout(r, 5));
+	const second = await register("b", join(dir, "repo"));
+	assert.deepEqual(second.workspaceSlot, { ordinal: 2, of: 2 });
+	const other = await register("c", join(dir, "elsewhere"));
+	assert.equal(other.workspaceSlot, null);
+	const { agents } = await (await fetch(`http://127.0.0.1:${port}/api/agents`, { headers: { "x-hub-token": hub.token } })).json();
+	assert.deepEqual(agents.map((a) => a.name).sort(), ["elsewhere", "repo #1", "repo #2"]);
+	await hub.close();
+});
+
+test("workspaces group connected sessions with unconnected pi processes", async () => {
+	const { createHub } = await import("../hub/server.mjs");
+	const { mkdtempSync } = await import("node:fs");
+	const { tmpdir } = await import("node:os");
+	const { join } = await import("node:path");
+	const dir = mkdtempSync(join(tmpdir(), "hub-ws-"));
+	const repo = join(dir, "repo");
+	const discover = (connected) => [
+		{ pid: 11, cwd: join(repo, "sub"), connected: connected.has(11) },
+		{ pid: 22, cwd: join(dir, "loose"), connected: connected.has(22) },
+		{ pid: 33, cwd: repo, connected: connected.has(33) },
+	];
+	const hub = createHub({ port: 0, stateFile: join(dir, "state.json"), silent: true, discover });
+	const port = await hub.listen();
+	const headers = { "x-hub-token": hub.token, "content-type": "application/json" };
+	await fetch(`http://127.0.0.1:${port}/api/sessions/register`, { method: "POST", headers, body: JSON.stringify({ id: "a", cwd: repo, repoRoot: repo, pid: 33 }) });
+	const res = await fetch(`http://127.0.0.1:${port}/api/workspaces`, { headers: { "x-hub-token": hub.humanToken } });
+	const { workspaces, unconnected } = await res.json();
+	assert.equal(unconnected, 2);
+	assert.equal(workspaces[0].title, "repo");
+	assert.deepEqual(workspaces[0].sessions.map((s) => s.id), ["a"]);
+	assert.deepEqual(workspaces[0].unconnected.map((p) => p.pid), [11]);
+	assert.deepEqual(workspaces[1].unconnected.map((p) => p.pid), [22]);
+	assert.equal((await fetch(`http://127.0.0.1:${port}/api/workspaces`, { headers: { "x-hub-token": hub.token } })).status, 403);
 	await hub.close();
 });

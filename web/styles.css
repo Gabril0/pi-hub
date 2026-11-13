@@ -886,6 +886,33 @@ label.field {
 	box-shadow: inset 0 0 0 1px rgba(240, 164, 58, 0.35);
 }
 
+.workspace + .workspace {
+	margin-top: 28px;
+}
+.workspace-head {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	margin-bottom: 12px;
+	min-width: 0;
+}
+.workspace-title {
+	font: 700 15px/20px var(--font-body);
+	color: var(--ink);
+	white-space: nowrap;
+}
+.workspace-path {
+	flex: 1;
+	min-width: 0;
+}
+.warn-text {
+	color: var(--warn-ink);
+}
+.agent-card.unconnected {
+	border-style: dashed;
+	border-color: rgba(240, 164, 58, 0.45);
+	background: rgba(240, 164, 58, 0.04);
+}
 .agent-card {
 	--c: var(--accent);
 	display: flex;

@@ -26,6 +26,7 @@ function PrCard({ pr }) {
 			<span class="spacer"></span>
 			<span class=${`pill ${STATE_TONE[pr.state] ?? ""}`}>${label(pr.state)}</span>
 			${pr.isDraft ? html`<span class="pill">draft</span>` : null}
+			${pr.watched ? html`<span class="pill accent" title="Linked by an agent, tracked outside its working directory">watched</span>` : null}
 		</div>
 		<a class="pr-title" href=${pr.url} target="_blank" rel="noreferrer">${pr.title}</a>
 		<div class="row small muted wrap">

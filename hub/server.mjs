@@ -7,7 +7,8 @@ import { fileURLToPath } from "node:url";
 import { buildId } from "./build.mjs";
 import { pickColor } from "./colors.mjs";
 import { HOST, HUB_DIR, LOG_FILE, PORT, ensureHubDir, loadConfig, mergeDeep, readToken, saveConfig } from "./config.mjs";
-import { fetchPrForCwd, ghAvailable, prTransitions } from "./github.mjs";
+import { fetchPr, fetchPrForCwd, ghAvailable, isPrRef, prKey, prTransitions } from "./github.mjs";
+import { discoverPiProcesses } from "./discovery.mjs";
 import { createNotifier } from "./notify.mjs";
 import { Store, newId, publicView } from "./store.mjs";
 import { createWorktree, focusSession, openBrowser, spawnAgent } from "./terminal.mjs";
@@ -102,6 +103,7 @@ export const AGENT_ROUTES = new Set([
 	"GET /api/sessions/:id/channel",
 	"POST /api/sessions/:id/events",
 	"POST /api/sessions/:id/state",
+	"POST /api/sessions/:id/watch-prs",
 	"GET /api/agent-config",
 	"POST /api/open-dashboard",
 	"POST /api/reviews",
@@ -123,7 +125,7 @@ export const AGENT_ROUTES = new Set([
 	"POST /api/shutdown",
 ]);
 
-export function createHub({ port = PORT, stateFile, silent = false, openBrowserFn = openBrowser, onShutdown, humanToken: fixedHumanToken } = {}) {
+export function createHub({ port = PORT, stateFile, silent = false, openBrowserFn = openBrowser, onShutdown, humanToken: fixedHumanToken, discover = discoverPiProcesses } = {}) {
 	ensureHubDir();
 	const token = readToken();
 	const humanToken = fixedHumanToken ?? process.env.PI_HUB_HUMAN_TOKEN ?? randomBytes(24).toString("hex");
@@ -165,8 +167,31 @@ export function createHub({ port = PORT, stateFile, silent = false, openBrowserF
 		return true;
 	}
 
+	function workspaceKey(session) {
+		return pathKey(session?.repoRoot || session?.cwd || session?.id || "");
+	}
+
+	function workspaceOrdinal(session) {
+		if (!session?.online) return undefined;
+		const key = workspaceKey(session);
+		const siblings = store
+			.all("sessions")
+			.filter((s) => s.online && workspaceKey(s) === key)
+			.sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0) || String(a.id).localeCompare(String(b.id)));
+		if (siblings.length < 2) return undefined;
+		return { ordinal: siblings.findIndex((s) => s.id === session.id) + 1, of: siblings.length };
+	}
+
+	function announceWorkspaceSlots(key) {
+		for (const session of store.all("sessions")) {
+			if (session.online && workspaceKey(session) === key) sendToSession(session.id, { type: "workspace_slot", slot: workspaceOrdinal(session) ?? null });
+		}
+	}
+
 	function sessionLabel(session) {
-		return session?.name || session?.repo || session?.cwd?.split(/[\\/]/).pop() || session?.id;
+		const base = session?.name || session?.repo || session?.cwd?.split(/[\\/]/).pop() || session?.id;
+		const slot = session ? workspaceOrdinal(session) : undefined;
+		return slot ? `${base} #${slot.ordinal}` : base;
 	}
 
 	function addInbox(item) {
@@ -201,6 +226,7 @@ export function createHub({ port = PORT, stateFile, silent = false, openBrowserF
 			sessions.find((s) => s.id.toLowerCase() === needle) ??
 			sessions.find((s) => s.online && String(s.name ?? "").toLowerCase() === needle) ??
 			sessions.find((s) => s.online && s.color?.name === needle) ??
+			sessions.find((s) => s.online && String(sessionLabel(s)).toLowerCase() === needle) ??
 			sessions.find((s) => String(s.name ?? "").toLowerCase() === needle) ??
 			sessions.find((s) => s.online && String(s.repo ?? "").toLowerCase() === needle)
 		);
@@ -264,7 +290,8 @@ export function createHub({ port = PORT, stateFile, silent = false, openBrowserF
 			sessionId,
 			setTimeout(() => {
 				if (channels.get(sessionId)?.size) return;
-				store.patch("sessions", sessionId, { online: false, status: "offline", lastSeen: Date.now() });
+				const gone = store.patch("sessions", sessionId, { online: false, status: "offline", lastSeen: Date.now() });
+				if (gone) announceWorkspaceSlots(workspaceKey(gone));
 				for (const review of store.all("reviews")) {
 					if (review.sessionId === sessionId && (review.status === "pending" || review.status === "thinking")) store.patch("reviews", review.id, { status: "stale" });
 				}
@@ -523,24 +550,68 @@ export function createHub({ port = PORT, stateFile, silent = false, openBrowserF
 	}
 
 	const prState = new Map();
+
+	function recordPr(pr, session, watched = false) {
+		const existing = store.get("prs", pr.id);
+		const previous = prState.get(pr.id) ?? existing;
+		const sessionIds = new Set(existing?.sessionIds ?? []);
+		sessionIds.add(session.id);
+		const saved = store.upsert("prs", { ...pr, sessionIds: [...sessionIds], sessionId: existing?.sessionId ?? session.id, watched: watched || existing?.watched || false, lastPolled: Date.now(), createdAt: previous?.createdAt ?? Date.now() });
+		prState.set(pr.id, saved);
+		for (const change of prTransitions(previous, pr)) {
+			addInbox({ kind: "pr", sessionId: session.id, refId: pr.id, title: `PR #${pr.number} ${change}`, body: `${pr.repo}: ${pr.title}`, path: "#/prs" });
+		}
+		return saved;
+	}
+
 	async function pollPrs() {
 		if (!ghAvailable()) return;
 		const cwds = new Map();
+		const watched = new Map();
 		for (const session of store.all("sessions")) {
-			if (session.online && session.cwd && session.isGitRepo !== false) cwds.set(session.cwd, session);
+			if (!session.online) continue;
+			if (session.cwd && session.isGitRepo !== false) cwds.set(session.cwd, session);
+			for (const ref of session.watchedPRs ?? []) {
+				if (!isPrRef(ref)) continue;
+				const entry = watched.get(prKey(ref)) ?? { ref, sessions: [] };
+				entry.sessions.push(session);
+				watched.set(prKey(ref), entry);
+			}
 		}
 		for (const [cwd, session] of cwds) {
 			const pr = await fetchPrForCwd(cwd);
-			if (!pr) continue;
-			const previous = prState.get(pr.id) ?? store.get("prs", pr.id);
-			const sessionIds = new Set(store.get("prs", pr.id)?.sessionIds ?? []);
-			sessionIds.add(session.id);
-			const saved = store.upsert("prs", { ...pr, sessionIds: [...sessionIds], sessionId: session.id, lastPolled: Date.now(), createdAt: previous?.createdAt ?? Date.now() });
-			prState.set(pr.id, saved);
-			for (const change of prTransitions(previous, pr)) {
-				addInbox({ kind: "pr", sessionId: session.id, refId: pr.id, title: `PR #${pr.number} ${change}`, body: pr.title, path: "#/prs" });
-			}
+			if (pr) recordPr(pr, session);
 		}
+		for (const { ref, sessions } of watched.values()) {
+			const pr = await fetchPr(ref);
+			if (pr) for (const session of sessions) recordPr(pr, session, true);
+		}
+	}
+
+	async function watchPrs(sessionId, refs) {
+		const session = store.get("sessions", sessionId);
+		if (!session) return undefined;
+		const current = (session.watchedPRs ?? []).filter(isPrRef);
+		const known = new Set(current.map(prKey));
+		const added = [];
+		for (const raw of Array.isArray(refs) ? refs : []) {
+			const ref = { repo: raw?.repo, number: Number(raw?.number) };
+			if (!isPrRef(ref) || known.has(prKey(ref))) continue;
+			known.add(prKey(ref));
+			added.push(ref);
+		}
+		if (!added.length) return { added: [], watched: current };
+		const watchedPRs = [...current, ...added].slice(-50);
+		store.patch("sessions", sessionId, { watchedPRs });
+		store.appendEvent(sessionId, { kind: "pr_watch", text: `watching ${added.map((r) => `${r.repo}#${r.number}`).join(", ")}` });
+		if (ghAvailable()) {
+			void Promise.all(added.map(async (ref) => {
+				const pr = await fetchPr(ref);
+				const fresh = store.get("sessions", sessionId);
+				if (pr && fresh) recordPr(pr, fresh, true);
+			})).catch(() => {});
+		}
+		return { added, watched: watchedPRs };
 	}
 
 	async function readBody(req) {
@@ -643,7 +714,9 @@ export function createHub({ port = PORT, stateFile, silent = false, openBrowserF
 
 	route("POST", "/api/sessions/register", ({ body }) => {
 		if (!body.id) return [400, { error: "id required" }];
-		return { session: registerSession(body) };
+		const session = registerSession(body);
+		announceWorkspaceSlots(workspaceKey(session));
+		return { session, workspaceSlot: workspaceOrdinal(session) ?? null };
 	});
 
 	route("GET", "/api/sessions/:id/channel", ({ req, res, params }) => {
@@ -670,6 +743,39 @@ export function createHub({ port = PORT, stateFile, silent = false, openBrowserF
 	route("POST", "/api/sessions/:id/state", ({ body, params }) => {
 		const session = store.patch("sessions", params.id, { ...pick(body, STATE_FIELDS), lastSeen: Date.now() });
 		return session ? { session } : [404, { error: "unknown session" }];
+	});
+
+	route("POST", "/api/sessions/:id/watch-prs", async ({ params, body }) => {
+		const result = await watchPrs(params.id, body.refs);
+		return result ?? [404, { error: "unknown session" }];
+	});
+
+	let discoveryCache = { at: 0, processes: [] };
+	async function discovered() {
+		if (Date.now() - discoveryCache.at < 4000) return discoveryCache.processes;
+		const connectedPids = new Set(store.all("sessions").filter((s) => s.online && s.pid).map((s) => Number(s.pid)));
+		const processes = await (async () => discover(connectedPids))().catch(() => []);
+		discoveryCache = { at: Date.now(), processes };
+		return processes;
+	}
+
+	route("GET", "/api/workspaces", async () => {
+		const online = store.all("sessions").filter((s) => s.online);
+		const groups = new Map();
+		const group = (key, path) => {
+			if (!groups.has(key)) groups.set(key, { key, path, title: String(path ?? key).split(/[\\/]/).filter(Boolean).pop() ?? key, sessions: [], unconnected: [] });
+			return groups.get(key);
+		};
+		for (const session of online) group(workspaceKey(session), session.repoRoot || session.cwd).sessions.push({ id: session.id, slot: workspaceOrdinal(session) ?? null });
+		const roots = online.map((s) => ({ key: workspaceKey(s), root: pathKey(s.repoRoot || s.cwd || "") })).sort((a, b) => b.root.length - a.root.length);
+		for (const proc of await discovered()) {
+			if (proc.connected || !proc.cwd) continue;
+			const cwdKey = pathKey(proc.cwd);
+			const owner = roots.find((r) => cwdKey === r.root || cwdKey.startsWith(`${r.root}/`));
+			group(owner?.key ?? cwdKey, owner ? undefined : proc.cwd).unconnected.push(proc);
+		}
+		const workspaces = [...groups.values()].sort((a, b) => b.sessions.length + b.unconnected.length - (a.sessions.length + a.unconnected.length) || a.title.localeCompare(b.title));
+		return { workspaces, unconnected: workspaces.reduce((n, w) => n + w.unconnected.length, 0) };
 	});
 
 	route("DELETE", "/api/sessions/:id", ({ params }) => {

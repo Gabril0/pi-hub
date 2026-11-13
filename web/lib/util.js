@@ -1,5 +1,5 @@
 import { html, useEffect, useState } from "../vendor/preact-htm.js";
-import { sessionOf } from "./store.js";
+import { allSessions, sessionOf } from "./store.js";
 
 export function timeAgo(ts) {
 	if (!ts) return "";
@@ -39,9 +39,34 @@ export function compact(n) {
 	return `${(n / 1_000_000).toFixed(1)}M`;
 }
 
-export function sessionName(session) {
+export function workspaceOf(session) {
+	const path = String(session?.repoRoot || session?.cwd || session?.id || "").replace(/\\/g, "/").replace(/\/+$/, "");
+	return /^[a-z]:\//i.test(path) ? path.toLowerCase() : path;
+}
+
+export function workspaceSiblings(session) {
+	if (!session?.online) return [];
+	const key = workspaceOf(session);
+	return allSessions()
+		.filter((s) => s.online && workspaceOf(s) === key)
+		.sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0) || String(a.id).localeCompare(String(b.id)));
+}
+
+export function workspaceOrdinal(session) {
+	const siblings = workspaceSiblings(session);
+	if (siblings.length < 2) return undefined;
+	return { ordinal: siblings.findIndex((s) => s.id === session.id) + 1, of: siblings.length };
+}
+
+export function baseName(session) {
 	if (!session) return "unknown";
 	return session.name || session.repo || session.cwd?.split(/[\\/]/).pop() || session.id;
+}
+
+export function sessionName(session) {
+	if (!session) return "unknown";
+	const slot = workspaceOrdinal(session);
+	return slot ? `${baseName(session)} #${slot.ordinal}` : baseName(session);
 }
 
 export function colorOf(sessionOrId) {

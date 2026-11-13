@@ -1,5 +1,6 @@
 import { complete, type Message } from "@mariozechner/pi-ai";
 import { convertToLlm, serializeConversation, type ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { finishRevision, extractRevision, numberLines, parseChatReply, REVISION_FORMAT, type ChatReply } from "./chat-reply";
 import { unifiedDiff } from "./edits";
 
 const MAX_FILE_CHARS = 120_000;
@@ -66,42 +67,40 @@ function reviewMaterial(review: ReviewContext): string {
 		"```diff",
 		diff,
 		"```",
-		includeFile ? `\nFull proposed file:\n\`\`\`\n${review.newContent}\n\`\`\`` : "",
+		includeFile
+			? `\nFull proposed file, numbered like the right side of the reviewer's diff view (the "N | " prefixes are not part of the file):\n\`\`\`\n${numberLines(review.newContent)}\n\`\`\``
+			: "",
 		chat ? `\nReview conversation so far:\n${chat}` : "",
 	].join("\n");
 }
 
-export async function answerReviewQuestion(ctx: ExtensionContext, review: ReviewContext, question: string, comments: LineComment[], signal?: AbortSignal): Promise<string> {
+export async function converseAboutProposal(ctx: ExtensionContext, review: ReviewContext, message: string, comments: LineComment[], signal?: AbortSignal): Promise<ChatReply> {
 	const system =
-		"You are the coding agent that proposed a file change. The user is reviewing it in a diff viewer before it is applied and is asking you about it. " +
-		"Answer directly and concisely in GitHub-flavored markdown. Explain the reasoning behind the change, reference specific lines, and flag real risks. " +
-		"Do not propose a rewritten file; the user has a separate button to request changes.";
+		"You are the coding agent that proposed a file change. The user is looking at it in a diff reviewer chat before it is applied. Decide what they want.\n" +
+		"- If they ask a question, answer directly and concisely in GitHub-flavored markdown, reference specific lines and flag real risks. Do not output a file.\n" +
+		'- If they tell you to change the proposal (for example "change line 32 to use a match", "rename foo", "drop the logging"), rewrite the proposal. ' +
+		`Output format, exactly:\n${REVISION_FORMAT}\n` +
+		"Line numbers the reviewer mentions refer to the numbered proposed file unless they say original. Change only what they asked and keep everything else identical. " +
+		"The reviewer still approves or denies afterwards; you are only editing the version under review.";
 	const prompt = [
 		"Conversation leading to this change:",
-		recentConversation(ctx),
+		recentConversation(ctx, 12_000),
+		"",
+		`Original file before the proposal:\n\`\`\`\`\n${review.oldContent.length <= MAX_FILE_CHARS ? review.oldContent : "(too large to include)"}\n\`\`\`\``,
 		"",
 		reviewMaterial(review),
 		"",
 		comments.length ? `Line comments from the reviewer:\n${formatLineComments(comments)}\n` : "",
-		`Reviewer question: ${question}`,
+		`Reviewer: ${message || "Address my line comments."}`,
 	].join("\n");
-	return ask(ctx, system, prompt, signal);
-}
-
-export function extractRevision(output: string): { note: string; content: string } | undefined {
-	const noteMatch = output.match(/^NOTE:\s*(.+)$/m);
-	const fence = output.match(/(`{3,}|~{3,})[^\n]*\n([\s\S]*?)\n\1\s*$/m) ?? output.match(/(`{3,}|~{3,})[^\n]*\n([\s\S]*)\n\1/);
-	if (!fence) return undefined;
-	return { note: noteMatch?.[1]?.trim() ?? "Revised per review feedback", content: fence[2] };
+	return parseChatReply(await ask(ctx, system, prompt, signal), review.newContent);
 }
 
 export async function reviseProposal(ctx: ExtensionContext, review: ReviewContext, instruction: string, comments: LineComment[], signal?: AbortSignal): Promise<{ note: string; content: string }> {
 	const system =
 		"You are the coding agent that proposed a file change. The reviewer requested changes to your proposal before it is applied. " +
-		"Produce the complete revised file. Output format, exactly:\n" +
-		"NOTE: <one sentence describing what you changed>\n" +
-		"````\n<the entire revised file content>\n````\n" +
-		"Use a four-backtick fence. Output nothing after the closing fence. Keep everything the reviewer did not ask to change identical to the proposed file. " +
+		`Produce the complete revised file. Output format, exactly:\n${REVISION_FORMAT}\n` +
+		"Keep everything the reviewer did not ask to change identical to the proposed file. Line numbers the reviewer mentions refer to the numbered proposed file. " +
 		"The original file (before your proposal) is the baseline; the reviewer may ask you to keep parts of it.";
 	const prompt = [
 		"Conversation leading to this change:",
@@ -117,8 +116,7 @@ export async function reviseProposal(ctx: ExtensionContext, review: ReviewContex
 	const output = await ask(ctx, system, prompt, signal);
 	const revision = extractRevision(output);
 	if (!revision) throw new Error("model did not return a fenced file");
-	if (review.newContent.endsWith("\n") && !revision.content.endsWith("\n")) revision.content += "\n";
-	return revision;
+	return finishRevision(revision, review.newContent);
 }
 
 export async function summarizeSession(ctx: ExtensionContext, signal?: AbortSignal): Promise<string> {

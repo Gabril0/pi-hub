@@ -19,7 +19,7 @@ Running several pi agents in tmux panes means constant context switching: which 
 
 | | |
 | --- | --- |
-| ![Negotiate](docs/screenshots/review-negotiate.png) | **Negotiate before approving.** Ask a question and the agent answers with its own model and context. Request a change and it rewrites the proposal (v2, v3…), which you can diff against the original or the previous version. |
+| ![Negotiate](docs/screenshots/review-negotiate.png) | **Talk to the change before approving it.** Ask a question and the agent answers with its own model and context. Or just say what to change ("change line 32 to use a match", "rename chant to sing") and the agent rewrites the version under review into v2, v3… without approving or denying anything. Line numbers match the right side of the diff. Compare any version against the original or the previous one, then decide. |
 
 - Split and unified views, word-level highlights, syntax colors, wrap, ignore-whitespace and context controls.
 - **Partial approval.** Untick individual hunks; the file keeps the original text for those.
@@ -47,6 +47,8 @@ Changesets need the agent's working directory to be a git repository.
 ### Multi-agent coordination
 
 - **Spawn in a worktree.** "New agent" can create a `git worktree` on a fresh `agent/<name>` branch, then pick the model, review mode and trust, and link a task. "Spawn agent for this task" does it from the task editor. Spawn settings are applied by the hub when the new session registers, so an agent can't fake them.
+- **Workspace slots.** Agents sharing a repo are numbered (`web #1`, `web #2`) everywhere in the dashboard and in pi's footer (`● hub coral #2/3`), and the Agents page groups cards by workspace.
+- **Finds pi without the extension.** On macOS and Linux the hub lists running `pi` processes (via `ps`, `lsof` or `/proc`, and tmux) that never connected, shows their tmux pane, and tells you to run `/reload` there.
 - **Shared context.** At the start of every prompt each agent gets a short system-prompt section listing the other agents, their tasks and the files they currently have in progress, with a nudge to coordinate through `hub_message` and `hub_tasks`.
 - Keyboard: `a` approve · `d` deny · `j`/`k` next/previous change · `x` include/exclude · `n`/`p` next/previous review · `s` split · `w` wrap · `c` chat · `?` help.
 
@@ -65,7 +67,7 @@ Changesets need the agent's working directory to be a git repository.
 
 - **Tests.** Test commands the agent runs are captured automatically, and you can run them from the hub too. Parsers: cargo, nextest, go (`-v`/`-json`), pytest, jest, vitest, `node --test`. Each run shows new failures, fixed tests, flaky tests, a trend and per-test output.
 - **Tasks.** A kanban board plus a dependency graph. Agents claim and update tasks with `hub_tasks` and get notified when a dependency finishes.
-- **Pull requests.** Uses `gh` to show checks, review decision and mergeability for each agent's branch.
+- **Pull requests.** Uses `gh` to show checks, review decision and mergeability for each agent's branch. PR links an agent writes in a reply, a tool call or `bash` output (for example after `gh pr create`) are watched too, even in other repositories, and so is anything added with `hub_watch_pr`.
 - **Results.** A searchable archive of every run's final answer.
 
 ## Install
@@ -120,6 +122,7 @@ sequenceDiagram
 | `hub_agents` | List the other connected agents |
 | `hub_message` | Message another agent (by id, name or color) or `human` |
 | `hub_tasks` | List, create, claim and update shared tasks |
+| `hub_watch_pr` | Track PRs by URL or `owner/repo#123`, including other repositories |
 
 | Command | |
 | --- | --- |
@@ -159,11 +162,11 @@ Everything else (notification kinds, auto-approve globs, summaries, PR polling, 
 ## Status
 
 - ✅ **Real pi CLI:** `npm run smoke` drives the actual `pi` binary with the extension and a scripted model. The edit is held, approved through the hub, then applied.
-- ✅ **30 automated tests:** approve, partial approve, deny with line comments, approval notes reaching the agent, stale-file guard, ask, revise in place, trust mode, hub restart mid-review, bash changesets with revert, checkpoint mode, agent-token permission limits, test parsers, security checks.
+- ✅ **46 automated tests:** approve, partial approve, deny with line comments, approval notes reaching the agent, stale-file guard, ask, revise in place, chat edits that make a new version without deciding, trust mode, hub restart mid-review, bash changesets with revert, checkpoint mode, PR link watching, workspace slots, process discovery parsing, agent-token permission limits, test parsers, security checks.
 - ⚠️ **Not yet battle-tested** with long real-world sessions on every platform. Bug reports are welcome.
 - **Known limits:**
   - Changes made through `bash` are reviewed after the command runs (as a revertable changeset), not blocked before it. Outside a git repository they are not tracked.
-  - The hub covers agents on one machine.
+  - The hub covers agents on one machine. Finding unconnected pi processes is not available on Windows.
   - "Request change" uses an extra call to the session's model, which costs tokens.
 
 ## Development

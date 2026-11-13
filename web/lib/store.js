@@ -158,6 +158,10 @@ export function sessionOf(id) {
 	return state.sessions.get(id);
 }
 
+export function allSessions() {
+	return [...state.sessions.values()];
+}
+
 export function sorted(map, key = "createdAt", desc = true) {
 	return [...map.values()].sort((a, b) => (desc ? (b[key] ?? 0) - (a[key] ?? 0) : (a[key] ?? 0) - (b[key] ?? 0)));
 }

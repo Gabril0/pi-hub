@@ -413,8 +413,8 @@ function Help({ onClose }) {
 		["s", "split ⇄ unified"],
 		["w", "toggle wrap"],
 		["c", "focus the negotiate box"],
-		["Enter", "ask a question"],
-		["Ctrl+Enter", "request a change (revised in place)"],
+		["Enter", "send: ask, or tell the agent what to change (\"change line 32 to …\")"],
+		["Ctrl+Enter", "force a change request (always makes a new version)"],
 		["click line #", "comment on a line"],
 	];
 	return html`<${Modal} onClose=${onClose}>
@@ -697,7 +697,7 @@ export function ReviewView({ id }) {
 			<div class="card negotiate">
 				<div>
 					<h3>Negotiate</h3>
-					<div class="negotiate-sub">Ask about the change or request edits. The agent revises the diff in place.</div>
+					<div class="negotiate-sub">Ask about it, or just say what to change ("change line 32 to use a match"). The agent edits the version under review into a new one; you still approve or deny.</div>
 				</div>
 				<div class="chat" ref=${chatRef}>
 					${review.reason ? html`<${AgentMessage} session=${session}>${review.reason}<//>` : null}
@@ -735,7 +735,7 @@ export function ReviewView({ id }) {
 							class="input"
 							rows="1"
 							disabled=${!actionable}
-							placeholder=${actionable ? "Ask a question or request a change…" : "This review is closed."}
+							placeholder=${actionable ? "Ask, or \"change line 32 to…\"" : "This review is closed."}
 							value=${draft}
 							onInput=${(e) => {
 								setDraft(e.target.value);
@@ -749,11 +749,11 @@ export function ReviewView({ id }) {
 								send(e.ctrlKey || e.metaKey ? "revise" : "ask");
 							}}
 						></textarea>
-						<button class="send-btn" title="Send question (Enter)" disabled=${!canSend} onClick=${() => send("ask")}><${Icon} name="send" size=${16} /></button>
-						<button class="send-btn alt" title="Request a change, revised in place (Ctrl+Enter)" disabled=${!canSend} onClick=${() => send("revise")}><${Icon} name="revise" size=${16} /></button>
+						<button class="send-btn" title="Send (Enter): the agent answers, or edits the version under review if you asked for a change" disabled=${!canSend} onClick=${() => send("ask")}><${Icon} name="send" size=${16} /></button>
+						<button class="send-btn alt" title="Force a change request: always makes a new version (Ctrl+Enter)" disabled=${!canSend} onClick=${() => send("revise")}><${Icon} name="revise" size=${16} /></button>
 					</div>
-					<div class="key-hint" title="Enter sends a question · Ctrl+Enter requests a change · Shift+Enter adds a newline · the draft becomes the deny note if you deny">
-						<span><kbd>Enter</kbd> send</span>·<span><kbd>⇧ Enter</kbd> newline</span>·<span><kbd>Ctrl ↵</kbd> change</span>·<span>draft = deny note</span>
+					<div class="key-hint" title="Enter sends (questions get answers, change requests make a new version) · Ctrl+Enter forces a change · Shift+Enter adds a newline · the draft becomes the deny note if you deny">
+						<span><kbd>Enter</kbd> send</span>·<span><kbd>⇧ Enter</kbd> newline</span>·<span><kbd>Ctrl ↵</kbd> force change</span>·<span>draft = deny note</span>
 					</div>
 				</div>
 			</div>

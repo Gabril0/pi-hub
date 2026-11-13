@@ -24,6 +24,7 @@ let session;
 let faux;
 const mainScript = [];
 const seenToolResults = [];
+const chatPrompts = [];
 
 async function api(method, path, body) {
 	const res = await fetch(`http://127.0.0.1:${process.env.PI_HUB_PORT}${path}`, {
@@ -53,7 +54,12 @@ before(async () => {
 		Array.from({ length: 40 }, () => (context) => {
 			const system = context.systemPrompt ?? "";
 			if (system.includes("reviewer requested changes")) return fauxAssistantMessage(fauxText("NOTE: renamed greeting\n````\nhello\nplanet\n````"));
-			if (system.includes("reviewing it in a diff viewer")) return fauxAssistantMessage(fauxText("It replaces world with there because you asked."));
+			if (system.includes("diff reviewer chat")) {
+				const prompt = context.messages.at(-1).content.map((c) => c.text).join("\n");
+				chatPrompts.push(prompt);
+				if (/Reviewer: change line 2/.test(prompt)) return fauxAssistantMessage(fauxText("NOTE: line 2 now says planet\n````\n1 | hello\n2 | planet\n````"));
+				return fauxAssistantMessage(fauxText("It replaces world with there because you asked."));
+			}
 			if (system.includes("Summarize what this coding agent")) return fauxAssistantMessage(fauxText("- summary bullet"));
 			const last = context.messages.at(-1);
 			if (last?.role === "toolResult") seenToolResults.push(last.content.map((c) => c.text).join("\n"));
@@ -134,6 +140,42 @@ test("ask and revise negotiate in place before approval", async () => {
 	await api("POST", `/api/reviews/${review.id}/decision`, { decision: "approve" });
 	await run;
 	assert.equal(readFileSync(file, "utf8"), "hello\nplanet\n");
+});
+
+test("chatting a change request edits the version under review without deciding it", async () => {
+	writeFileSync(file, "hello\nworld\n");
+	mainScript.push(editCall("world", "there"));
+	const run = session.prompt("change world once more");
+	const review = await waitFor(async () => (await api("GET", "/api/state")).reviews.find((r) => r.status === "pending"), "pending review");
+	await api("POST", `/api/reviews/${review.id}/ask`, { text: "change line 2 to planet" });
+	const revised = await waitFor(async () => {
+		const { review: r } = await api("GET", `/api/reviews/${review.id}`);
+		return r.revisions.length === 2 && r.status === "pending" ? r : undefined;
+	}, "chat revision");
+	assert.equal(revised.revisions[1].content, "hello\nplanet\n");
+	assert.equal(revised.revisions[1].note, "line 2 now says planet");
+	assert.equal(revised.status, "pending");
+	assert.match(chatPrompts.at(-1), /2 \| there/);
+	await api("POST", `/api/reviews/${review.id}/ask`, { text: "is that safe?" });
+	await waitFor(async () => (await api("GET", `/api/reviews/${review.id}`)).review.chat.filter((m) => m.role === "agent").length >= 2, "agent answer");
+	const { review: afterQuestion } = await api("GET", `/api/reviews/${review.id}`);
+	assert.equal(afterQuestion.revisions.length, 2);
+	assert.equal(readFileSync(file, "utf8"), "hello\nworld\n");
+	await api("POST", `/api/reviews/${review.id}/decision`, { decision: "approve" });
+	await run;
+	assert.equal(readFileSync(file, "utf8"), "hello\nplanet\n");
+});
+
+test("PR links in replies are watched for the session", async () => {
+	mainScript.push(() => fauxAssistantMessage(fauxText("Opened https://github.com/octo-org/other-repo/pull/42 for review.")));
+	await session.prompt("open a pr");
+	const watched = await waitFor(async () => {
+		const s = (await api("GET", "/api/state")).sessions.find((x) => x.id === "e2e-agent");
+		return s?.watchedPRs?.length ? s.watchedPRs : undefined;
+	}, "watched PRs");
+	assert.deepEqual(watched, [{ repo: "octo-org/other-repo", number: 42 }]);
+	const rejected = await api("POST", "/api/sessions/e2e-agent/watch-prs", { refs: [{ repo: "evil/x; rm -rf /", number: 1 }, { repo: "a/b", number: 0 }] });
+	assert.deepEqual(rejected.added, []);
 });
 
 test("trust mode auto-approves without a pending review", async () => {

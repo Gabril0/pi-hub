@@ -32,14 +32,35 @@ export function summarizeChecks(rollup = []) {
 	return { checks, overall };
 }
 
-export async function fetchPrForCwd(cwd) {
-	const pr = await gh(["pr", "view", "--json", FIELDS], cwd);
-	if (!pr?.number) return undefined;
-	const repo = await gh(["repo", "view", "--json", "nameWithOwner"], cwd);
+const PR_URL = /https?:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/pull\/(\d+)/g;
+const PR_SHORT = /(?<![\w./-])([\w.-]+\/[\w.-]+)#(\d+)\b/g;
+
+export function isPrRef(ref) {
+	return Boolean(ref) && typeof ref.repo === "string" && /^[\w.-]+\/[\w.-]+$/.test(ref.repo) && Number.isInteger(ref.number) && ref.number > 0;
+}
+
+export function prKey(ref) {
+	return `${ref.repo.toLowerCase()}#${ref.number}`;
+}
+
+export function parsePrRefs(text, { short = false } = {}) {
+	const found = new Map();
+	const value = String(text ?? "");
+	const patterns = short ? [PR_URL, PR_SHORT] : [PR_URL];
+	for (const pattern of patterns) {
+		for (const match of value.matchAll(pattern)) {
+			const ref = { repo: match[1], number: Number(match[2]) };
+			if (isPrRef(ref) && !found.has(prKey(ref))) found.set(prKey(ref), ref);
+		}
+	}
+	return [...found.values()];
+}
+
+export function toPr(pr, repo) {
 	const { checks, overall } = summarizeChecks(pr.statusCheckRollup);
 	return {
-		id: `pr_${repo?.nameWithOwner ?? cwd}#${pr.number}`.replace(/[^\w#/.-]/g, "_"),
-		repo: repo?.nameWithOwner ?? cwd,
+		id: `pr_${repo}#${pr.number}`.replace(/[^\w#/.-]/g, "_"),
+		repo,
 		number: pr.number,
 		title: pr.title,
 		url: pr.url,
@@ -54,6 +75,20 @@ export async function fetchPrForCwd(cwd) {
 		checks,
 		checksState: overall,
 	};
+}
+
+export async function fetchPrForCwd(cwd) {
+	const pr = await gh(["pr", "view", "--json", FIELDS], cwd);
+	if (!pr?.number) return undefined;
+	const repo = await gh(["repo", "view", "--json", "nameWithOwner"], cwd);
+	return toPr(pr, repo?.nameWithOwner ?? cwd);
+}
+
+export async function fetchPr(ref) {
+	if (!isPrRef(ref)) return undefined;
+	const pr = await gh(["pr", "view", String(ref.number), "--repo", ref.repo, "--json", FIELDS]);
+	if (!pr?.number) return undefined;
+	return toPr(pr, ref.repo);
 }
 
 export function prTransitions(previous, next) {

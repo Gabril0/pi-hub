@@ -7,7 +7,12 @@ process.env.PI_HUB_PORT ??= "4810";
 process.env.PI_HUB_SILENT ??= "1";
 
 const { createHub } = await import("../hub/server.mjs");
-const hub = createHub({ port: Number(process.env.PI_HUB_PORT), stateFile: join(process.env.PI_HUB_DIR, "state.json"), silent: true, openBrowserFn: () => {} });
+const startedAt = Date.now();
+const demoProcesses = () => [
+	{ pid: 4242, cwd: "/home/dev/code/orders-api", tmuxPane: "%9", tmuxLocation: "work:2.1", startedAt: startedAt - 42 * 60 * 1000, connected: false },
+	{ pid: 5151, cwd: "/home/dev/code/infra", tmuxPane: "%11", tmuxLocation: "ops:0.0", startedAt: startedAt - 3 * 3600 * 1000, connected: false },
+];
+const hub = createHub({ port: Number(process.env.PI_HUB_PORT), stateFile: join(process.env.PI_HUB_DIR, "state.json"), silent: true, openBrowserFn: () => {}, discover: demoProcesses });
 await hub.listen();
 
 const base = `http://127.0.0.1:${hub.port}`;
@@ -21,9 +26,24 @@ const sessions = [
 	{ id: "demo-rust", name: "rust", repo: "tung-sahur", branch: "feat/parity-chant", model: "anthropic/claude-opus-5-5", tmuxPane: "%1" },
 	{ id: "demo-api", name: "api", repo: "orders-api", branch: "chore/sdk-bump", model: "anthropic/claude-opus-5-5", tmuxPane: "%3" },
 	{ id: "demo-web", name: "web", repo: "storefront-web", branch: "feat/discount-badge", model: "anthropic/claude-opus-5-5", tmuxPane: "%5" },
+	{ id: "demo-web-2", name: "web", repo: "storefront-web", branch: "feat/discount-badge", model: "anthropic/claude-sonnet-5-5", tmuxPane: "%6" },
 	{ id: "demo-sdk", name: "sdk", repo: "acme-sdk", branch: "main", model: "anthropic/claude-sonnet-5-5", tmuxPane: "%7" },
 ];
-for (const s of sessions) await call("POST", "/api/sessions/register", { ...s, cwd: posix.join(work, s.repo), pid: 1000, platform: "linux" });
+for (const [i, s] of sessions.entries()) {
+	await call("POST", "/api/sessions/register", { ...s, cwd: posix.join(work, s.repo), pid: 1000 + i, platform: "linux" });
+	await new Promise((r) => setTimeout(r, 3));
+}
+await call("POST", "/api/sessions/demo-web-2/events", {
+	events: [
+		{ kind: "agent_start", prompt: "Write vitest coverage for the discount badge while the other web agent implements it." },
+		{ kind: "progress", steps: [{ title: "Read invoice.ts", status: "done" }, { title: "Write badge tests", status: "active" }] },
+		{ kind: "usage", cost: 0.21, input: 18000, output: 1900, cacheRead: 60000 },
+	],
+});
+await call("POST", "/api/sessions/demo-sdk/watch-prs", { refs: [{ repo: "acme/platform-infra", number: 318 }] });
+const prBase = { state: "OPEN", isDraft: false, mergeable: "MERGEABLE", createdAt: Date.now(), lastPolled: Date.now() };
+hub.store.upsert("prs", { ...prBase, id: "pr_acme/orders-api#214", repo: "acme/orders-api", number: 214, title: "chore: bump acme_* crates to 4f2c9e1", url: "https://github.com/acme/orders-api/pull/214", reviewDecision: "REVIEW_REQUIRED", head: "chore/sdk-bump", base: "main", checks: [{ name: "cargo test", state: "passed" }, { name: "clippy", state: "pending" }], checksState: "pending", sessionId: "demo-api", sessionIds: ["demo-api"] });
+hub.store.upsert("prs", { ...prBase, id: "pr_acme/platform-infra#318", repo: "acme/platform-infra", number: 318, title: "feat: enable sdk retries in staging", url: "https://github.com/acme/platform-infra/pull/318", reviewDecision: "APPROVED", head: "feat/staging-retries", base: "main", checks: [{ name: "terraform plan", state: "passed" }, { name: "policy", state: "passed" }], checksState: "passed", sessionId: "demo-sdk", sessionIds: ["demo-sdk"], watched: true });
 
 await call("POST", "/api/sessions/demo-rust/events", {
 	events: [
@@ -108,6 +128,48 @@ const t2 = await call("POST", "/api/tasks", { title: "Bump api to SDK 4f2c9e1", 
 const t3 = await call("POST", "/api/tasks", { title: "Discount badge on invoices", status: "doing", owner: "demo-web", deps: [t1.task.id] });
 await call("POST", "/api/tasks", { title: "Re-pin web to merged SDK rev", status: "todo", deps: [t2.task.id, t3.task.id] });
 await call("POST", "/api/tasks", { title: "Enable retries in staging", status: "todo", deps: [t3.task.id] });
+
+function scriptedChat(content, text) {
+	const lines = content.split("\n");
+	const lineEdit = text.match(/line\s+(\d+)\s+(?:to|into|so it says)\s+([\s\S]+)/i);
+	if (lineEdit && Number(lineEdit[1]) >= 1 && Number(lineEdit[1]) <= lines.length) {
+		const index = Number(lineEdit[1]) - 1;
+		const indent = lines[index].match(/^\s*/)[0];
+		const replacement = lineEdit[2].trim().replace(/^`+|`+$/g, "");
+		lines[index] = indent + replacement.trimStart();
+		return { content: lines.join("\n"), note: `Line ${index + 1} is now \`${replacement.trim()}\`.` };
+	}
+	const rename = text.match(/rename\s+`?(\w+)`?\s+to\s+`?(\w+)`?/i);
+	if (rename && new RegExp(`\\b${rename[1]}\\b`).test(content)) {
+		return { content: content.replace(new RegExp(`\\b${rename[1]}\\b`, "g"), rename[2]), note: `Renamed \`${rename[1]}\` to \`${rename[2]}\` everywhere in this file.` };
+	}
+	return { answer: "A `match` on `n % 2` lists both outcomes side by side, so adding a third chant later is one more arm instead of another `else if`." };
+}
+
+async function scriptedAgent(sessionId) {
+	const res = await fetch(`${base}/api/sessions/${sessionId}/channel`, { headers: { "x-hub-token": hub.token } });
+	const decoder = new TextDecoder();
+	let buffer = "";
+	for await (const chunk of res.body) {
+		buffer += decoder.decode(chunk, { stream: true });
+		let index;
+		while ((index = buffer.indexOf("\n\n")) !== -1) {
+			const frame = buffer.slice(0, index);
+			buffer = buffer.slice(index + 2);
+			const data = frame.split("\n").filter((l) => l.startsWith("data: ")).map((l) => l.slice(6)).join("");
+			if (!data) continue;
+			const message = JSON.parse(data);
+			if (message.type !== "review_ask" && message.type !== "review_revise") continue;
+			const { review } = await call("GET", `/api/reviews/${message.reviewId}`);
+			const latest = review.revisions.at(-1).content;
+			await new Promise((r) => setTimeout(r, 900));
+			const reply = scriptedChat(latest, message.text);
+			if (reply.content && reply.content !== latest) await call("POST", `/api/reviews/${message.reviewId}/revision`, { content: reply.content, note: reply.note });
+			else await call("POST", `/api/reviews/${message.reviewId}/chat`, { role: "agent", text: reply.answer ?? "That line already says that, so there is nothing to change." });
+		}
+	}
+}
+for (const sessionId of ["demo-rust", "demo-web"]) scriptedAgent(sessionId).catch(() => {});
 
 writeFileSync(join(process.env.PI_HUB_DIR, "demo-url.txt"), hub.url());
 console.log(`demo hub: ${hub.url()}`);
