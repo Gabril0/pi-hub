@@ -50,6 +50,17 @@ export function parseExplainReply(output: string): ExplainReply | undefined {
 	};
 }
 
+export type ReconcileReply = { kind: "unaffected" } | { kind: "redo"; reason: string } | { kind: "revised"; note: string; content: string };
+
+export function parseReconcileReply(output: string, previous: string): ReconcileReply {
+	if (/^\s*UNAFFECTED\b/i.test(output)) return { kind: "unaffected" };
+	const redo = output.match(/^\s*REDO:\s*(.+)$/im);
+	if (redo) return { kind: "redo", reason: redo[1].trim() };
+	const revision = /^\s*NOTE:/.test(output) ? extractRevision(output) : undefined;
+	if (!revision) throw new Error("model gave no usable verdict");
+	return { kind: "revised", ...finishRevision(revision, previous) };
+}
+
 export function extractRevision(output: string): { note: string; content: string } | undefined {
 	const noteMatch = output.match(/^NOTE:\s*(.+)$/m);
 	const fence = output.match(/(`{3,}|~{3,})[^\n]*\n([\s\S]*?)\n\1\s*$/m) ?? output.match(/(`{3,}|~{3,})[^\n]*\n([\s\S]*)\n\1/);

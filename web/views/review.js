@@ -1,6 +1,6 @@
 import { html, useEffect, useMemo, useRef, useState } from "../vendor/preact-htm.js";
 import { alignBlock, buildHunks, contentWithBlocks, diffOps, escape, highlightLines, languageFor, pairRows, smartCollapse, stats, wordDiff } from "../lib/diff.js";
-import { api, openChangesets, pendingReviews, sessionOf, sorted, toast, useStore } from "../lib/store.js";
+import { api, getState, openChangesets, pendingReviews, sessionOf, sorted, toast, useStore } from "../lib/store.js";
 import { Icon } from "../lib/icons.js";
 import { Empty, LineStats, Markdown, Modal, SessionChip, Status, colorOf, isTyping, navigate, sessionName, timeAgo } from "../lib/util.js";
 import { ExplainPanel } from "./diagram.js";
@@ -526,9 +526,17 @@ export function ReviewView({ id }) {
 	const counts = model ? stats(model.ops) : { added: 0, removed: 0 };
 	const allExcluded = Boolean(model && rejected.size && rejected.size >= model.blocks);
 
-	const goNext = () => {
+	const bufferedNext = [...state.reviews.values()].find((r) => r.status === "buffered" && r.sessionId === (summary?.sessionId ?? review?.sessionId));
+
+	const goNext = (attempt = 0) => {
+		if (location.hash !== `#/review/${id}`) return;
+		const sessionId = review.sessionId;
 		const others = pendingReviews().filter((r) => r.id !== id);
-		if (others.length) navigate(`#/review/${others[0].id}`);
+		const sameAgent = others.find((r) => r.sessionId === sessionId);
+		const waiting = [...getState().reviews.values()].some((r) => r.status === "buffered" && r.sessionId === sessionId);
+		if (sameAgent) navigate(`#/review/${sameAgent.id}`);
+		else if (waiting && attempt < 150) setTimeout(() => goNext(attempt + 1), 100);
+		else if (others.length) navigate(`#/review/${others[0].id}`);
 	};
 
 	const decide = async (decision) => {
@@ -553,7 +561,7 @@ export function ReviewView({ id }) {
 			reviewMemory.delete(id);
 			setDraft("");
 			setComments([]);
-			setTimeout(goNext, 350);
+			setTimeout(() => goNext(), 150);
 		} catch (error) {
 			toast({ kind: "error", sessionId: review.sessionId, tone: "bad", title: "Decision failed", body: error.message });
 		} finally {
@@ -599,7 +607,7 @@ export function ReviewView({ id }) {
 	if (error) return html`<div class="page"><${Empty} title="Review not found">${error}<//></div>`;
 	if (!review) return html`<div class="page"><div class="empty small">Loading review…</div></div>`;
 
-	const statusLabel = { pending: "review needed", thinking: "agent is thinking", approved: "approved", denied: "denied", cancelled: "cancelled", stale: "stale — agent restarted" }[status] ?? status;
+	const statusLabel = { pending: "review needed", thinking: "agent is thinking", approved: "approved", denied: "denied", cancelled: "cancelled", stale: "stale — agent restarted", buffered: "queued behind the current diff" }[status] ?? status;
 	const chat = review.chat ?? [];
 	const approveDisabled = !actionable || busy || allExcluded;
 	const canSend = actionable && status !== "thinking" && Boolean(draft.trim() || comments.length);
@@ -612,6 +620,7 @@ export function ReviewView({ id }) {
 			${review.applied === true ? html`<span class="pill ok">applied</span>` : review.applied === false ? html`<span class="pill bad">apply failed</span>` : null}
 			${review.partial ? html`<span class="pill accent">partially approved</span>` : null}
 			<span class="tiny faint">${timeAgo(review.createdAt)}</span>
+			${actionable && bufferedNext ? html`<span class="pill ok next-ready" title=${bufferedNext.path}>next diff ready</span>` : actionable && session?.status === "working" ? html`<span class="pill accent">preparing next step…</span>` : null}
 			<span class="spacer"></span>
 			${queue.length > 1 || (queue.length === 1 && queueIndex === -1)
 				? html`<div class="row small muted pager">
@@ -838,7 +847,7 @@ export function ReviewsView() {
 		list.push(r);
 		groups.set(r.sessionId, list);
 	}
-	const decidedReviews = sorted(state.reviews).filter((r) => r.status !== "pending" && r.status !== "thinking");
+	const decidedReviews = sorted(state.reviews).filter((r) => !["pending", "thinking", "buffered"].includes(r.status));
 	const decidedChanges = sorted(state.changesets).filter((c) => c.status !== "open");
 	const history = [...decidedReviews.map((item) => ({ type: "review", item })), ...decidedChanges.map((item) => ({ type: "changeset", item }))]
 		.filter((entry) => !filter || entry.item.sessionId === filter)

@@ -1,12 +1,15 @@
 import { execFile } from "node:child_process";
+import { constants, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { access } from "node:fs/promises";
 import { hostname } from "node:os";
-import { basename, isAbsolute, relative } from "node:path";
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { basename, dirname, isAbsolute, relative } from "node:path";
+import { createEditToolDefinition, createReadToolDefinition, createWriteToolDefinition, type ExtensionAPI, type ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { Type } from "typebox";
-import { buildProposal, changedSinceProposal, diffStats, type Proposal, rewriteInputForContent } from "./edits";
+import { buildProposal, changedSinceProposal, diffStats, normalizeToLF, type Proposal, rebaseChange, resolveToolPath, restoreFormat, rewriteInputForContent, stripBom } from "./edits";
+import { type StagedEntry, StagedQueue } from "./lookahead";
 import { type ChannelMessage, HubClient } from "./hub-client";
 import { diffSnapshots, isReadOnlyCommand, type Snapshot, takeSnapshot } from "./snapshot";
-import { converseAboutProposal, explainChange, formatLineComments, type LineComment, reviseProposal, summarizeSession } from "./llm";
+import { converseAboutProposal, explainChange, formatLineComments, type LineComment, reconcileBufferedChange, reviseProposal, summarizeSession } from "./llm";
 import { isTestCommand } from "../hub/test-parsers.mjs";
 import { parsePrRefs, prKey } from "../hub/github.mjs";
 
@@ -131,6 +134,67 @@ export default function piHub(pi: ExtensionAPI) {
 	let runTurns = 0;
 	let workspaceSlot: { ordinal: number; of: number } | null = null;
 	const watchedPrKeys = new Set<string>();
+	const lookaheadAllowed = process.env.PI_HUB_LOOKAHEAD !== "0";
+	let lookahead = lookaheadAllowed;
+	const stagedCalls = new Set<string>();
+
+	function readDisk(absPath: string): string | null {
+		return existsSync(absPath) ? readFileSync(absPath, "utf8") : null;
+	}
+
+	function proposalOf(entry: StagedEntry): Proposal {
+		return { tool: entry.tool, path: entry.path, absPath: entry.absPath, isNew: entry.isNew, oldContent: entry.before, newContent: entry.after, rawBefore: entry.rawBase };
+	}
+
+	const staged = new StagedQueue({
+		create: (entry) =>
+			client.post("/api/reviews", {
+				sessionId: id,
+				toolCallId: entry.toolCallId,
+				tool: entry.tool,
+				path: entry.path,
+				absPath: entry.absPath,
+				isNew: entry.isNew,
+				oldContent: entry.before,
+				newContent: entry.after,
+				intent: currentIntent(entry.ctx),
+				held: entry.held,
+			}),
+		wait: (entry) => {
+			runFiles.add(entry.absPath);
+			return waitForDecision(entry.id, { id: entry.id, toolCallId: entry.toolCallId, proposal: proposalOf(entry), chat: [], latest: entry.after, ctx: entry.ctx }, entry.ctx.signal);
+		},
+		promote: (reviewId) => client.post(`/api/reviews/${reviewId}/promote`, {}),
+		revise: (reviewId, change) => {
+			const pending = pendingReviews.get(reviewId);
+			if (pending) {
+				pending.latest = change.content;
+				pending.proposal = { ...pending.proposal, oldContent: change.oldContent, newContent: change.content };
+			}
+			return client.post(`/api/reviews/${reviewId}/revision`, change);
+		},
+		cancel: async (entry, reason) => {
+			pendingReviews.get(entry.id)?.resolve({ decision: "cancelled" });
+			runFiles.delete(entry.absPath);
+			await client.post(`/api/reviews/${entry.id}/cancel`, { reason });
+		},
+		applied: (reviewId, ok, error) => client.post(`/api/reviews/${reviewId}/applied`, { ok, error }),
+		reconcile: ({ ctx, ...check }) => reconcileBufferedChange(ctx, check),
+		readDisk,
+		writeDisk: (absPath, raw) => {
+			mkdirSync(dirname(absPath), { recursive: true });
+			writeFileSync(absPath, raw);
+		},
+		display: (tool, raw) => (tool === "edit" ? normalizeToLF(stripBom(raw)) : raw),
+		restore: restoreFormat,
+		rebase: rebaseChange,
+		denialNote: (path, decision) => formatDenial(path, decision as ReviewDecision),
+		approvalNote: (path, decision, modified) => formatApprovalNotes(path, decision as ReviewDecision, modified),
+	});
+
+	function staging(): boolean {
+		return lookahead && gateEnabled && reviewMode === "gate";
+	}
 
 	const client = new HubClient(id, (message) => handleChannel(message), async () => resync());
 
@@ -190,6 +254,7 @@ export default function piHub(pi: ExtensionAPI) {
 		try {
 			const agentConfig = await client.get("/api/agent-config");
 			summaryConfig = agentConfig.summaries ?? summaryConfig;
+			lookahead = lookaheadAllowed && agentConfig.review?.lookahead !== false;
 		} catch {}
 		renderStatus();
 	}
@@ -234,8 +299,10 @@ export default function piHub(pi: ExtensionAPI) {
 			oldContent: pending.proposal.oldContent,
 			newContent: pending.latest,
 			snippetOnly: pending.proposal.snippetOnly,
+			held: staged.isHeld(oldId),
 			reason: "Re-requested after the hub restarted.",
 		});
+		staged.rename(oldId, created.id);
 		pendingReviews.delete(oldId);
 		pending.id = created.id;
 		pendingReviews.set(created.id, pending);
@@ -270,6 +337,7 @@ export default function piHub(pi: ExtensionAPI) {
 				pending.latest = revision.content;
 				pending.chat.push({ role: "agent", text: revision.note });
 				await client.post(`/api/reviews/${message.reviewId}/revision`, { content: revision.content, note: revision.note });
+				staged.headChanged(message.reviewId, revision.content, `the reviewer asked: ${message.text}`, revision.note);
 			} else {
 				const reply = await converseAboutProposal(pending.ctx, reviewContext, message.text, message.lineComments ?? [], signal);
 				if (signal.aborted) return;
@@ -282,6 +350,7 @@ export default function piHub(pi: ExtensionAPI) {
 					pending.latest = reply.content;
 					pending.chat.push({ role: "agent", text: reply.note });
 					await client.post(`/api/reviews/${message.reviewId}/revision`, { content: reply.content, note: reply.note });
+					staged.headChanged(message.reviewId, reply.content, `the reviewer asked: ${message.text}`, reply.note);
 				} else {
 					pending.chat.push({ role: "agent", text: reply.text });
 					await client.post(`/api/reviews/${message.reviewId}/chat`, { role: "agent", text: reply.text });
@@ -306,6 +375,7 @@ export default function piHub(pi: ExtensionAPI) {
 	}
 
 	async function handleReviewExplain(reviewId: string, reasons: string[]) {
+		for (let i = 0; i < 20 && !pendingReviews.has(reviewId); i++) await new Promise((resolve) => setTimeout(resolve, 50));
 		const pending = pendingReviews.get(reviewId);
 		if (!pending) {
 			await client.post(`/api/reviews/${reviewId}/diagram`, { error: "This review is no longer active in the agent." }).catch(() => {});
@@ -407,6 +477,7 @@ export default function piHub(pi: ExtensionAPI) {
 				break;
 			case "config":
 				summaryConfig = message.config?.summaries ?? summaryConfig;
+				lookahead = lookaheadAllowed && message.config?.review?.lookahead !== false;
 				break;
 			case "review_feedback":
 				deliverHubNote(message.text);
@@ -461,7 +532,8 @@ export default function piHub(pi: ExtensionAPI) {
 		if (client.connected) await register().catch(() => {});
 	});
 
-	pi.on("session_shutdown", async () => {
+	pi.on("session_shutdown", async (_event, ctx) => {
+		if (!ctx.hasUI && staged.size) await staged.drained();
 		latestCtx = undefined;
 		const open = [...pendingReviews.values()];
 		await Promise.all(open.map((pending) => client.post(`/api/reviews/${pending.id}/cancel`, { reason: "pi session ended" }).catch(() => {})));
@@ -527,16 +599,22 @@ export default function piHub(pi: ExtensionAPI) {
 		const messages: any[] = (event as any).messages ?? [];
 		const lastAssistant = [...messages].reverse().find((m) => m?.role === "assistant");
 		const error = lastAssistant?.stopReason === "error" ? lastAssistant.errorMessage ?? "error" : lastAssistant?.stopReason === "aborted" ? "aborted" : undefined;
-		client.event({ kind: "agent_end", text: textOf(lastAssistant?.content), error, files: [...runFiles] });
-		await client.flush();
-		if (turnSnapshot) {
-			const before = await turnSnapshot;
-			turnSnapshot = undefined;
-			await reportChanges(before, cwd, "turn", lastPrompt);
-		}
-		if (summaryConfig.onAgentEnd && runTurns >= (summaryConfig.minTurns ?? 3) && !error) void runSummary();
-		const branch = await git(cwd, ["rev-parse", "--abbrev-ref", "HEAD"]);
-		if (branch) void client.post(`/api/sessions/${encodeURIComponent(id)}/state`, { branch }).catch(() => {});
+		const finish = async () => {
+			client.event({ kind: "agent_end", text: textOf(lastAssistant?.content), error, files: [...runFiles] });
+			await client.flush();
+			if (turnSnapshot) {
+				const before = await turnSnapshot;
+				turnSnapshot = undefined;
+				await reportChanges(before, cwd, "turn", lastPrompt);
+			}
+			if (summaryConfig.onAgentEnd && runTurns >= (summaryConfig.minTurns ?? 3) && !error) void runSummary();
+			const branch = await git(cwd, ["rev-parse", "--abbrev-ref", "HEAD"]);
+			if (branch) void client.post(`/api/sessions/${encodeURIComponent(id)}/state`, { branch }).catch(() => {});
+			const notes = staged.takeNotes();
+			if (notes.length) deliverHubNote(`[pi hub review]\n${notes.join("\n")}`);
+		};
+		if (staged.size) void staged.drained().then(finish).catch(() => {});
+		else await finish();
 	});
 
 	async function reportChanges(before: Snapshot | undefined, cwd: string, kind: "bash" | "turn", title: string, afterSnapshot?: Snapshot) {
@@ -618,9 +696,11 @@ export default function piHub(pi: ExtensionAPI) {
 	pi.on("tool_call", async (event, ctx) => {
 		latestCtx = ctx;
 		void watchPrsIn(inputText(event.input)).catch(() => {});
+		if (staging() && (event.toolName === "edit" || event.toolName === "write")) return;
 		if (gateEnabled && reviewMode === "gate" && event.toolName === "bash") {
 			const command = String((event.input as any)?.command ?? "");
 			if (!isReadOnlyCommand(command)) {
+				if (staged.size) await staged.drained(ctx.signal);
 				const before = await takeSnapshot(ctx.cwd).catch(() => undefined);
 				bashSnapshots.set(event.toolCallId, Promise.resolve(before));
 			}
@@ -694,6 +774,8 @@ export default function piHub(pi: ExtensionAPI) {
 			approvalNotes.delete(event.toolCallId);
 			if (notes && !event.isError) patched = { content: [...(event.content ?? []), { type: "text", text: notes }] };
 		}
+		const extra = stagedResultNotes(event.toolName, event.toolCallId, event.input, event.isError);
+		if (extra.length) patched = { content: [...(patched?.content ?? event.content ?? []), { type: "text", text: extra.join("\n") }] };
 		const bashBefore = bashSnapshots.get(event.toolCallId);
 		if (bashBefore) {
 			bashSnapshots.delete(event.toolCallId);
@@ -710,6 +792,74 @@ export default function piHub(pi: ExtensionAPI) {
 		}
 		return patched;
 	});
+
+	function stagedResultNotes(toolName: string, toolCallId: string, input: any, isError: boolean): string[] {
+		const notes: string[] = [];
+		if (stagedCalls.delete(toolCallId) && !isError) notes.push("[pi hub] This change is staged for human review and is not on disk yet. Reads through the read tool already show it, so keep going with your next step. You will be told if the reviewer changes or rejects it.");
+		const readsDisk = ["grep", "find", "ls"].includes(toolName) || (toolName === "bash" && isReadOnlyCommand(String(input?.command ?? "")));
+		if (readsDisk && staged.size) notes.push(`[pi hub] Staged changes to ${staged.paths.join(", ")} are not on disk yet, so this output does not include them.`);
+		const review = staged.takeNotes();
+		if (review.length) notes.push(`[pi hub review]\n${review.join("\n")}`);
+		return notes;
+	}
+
+	async function stageWrite(toolCallId: string, tool: "edit" | "write", path: string, absPath: string, content: string, readBase: string | undefined, signal: AbortSignal | undefined, ctx: ExtensionContext) {
+		latestCtx = ctx;
+		if (!(await client.ready())) {
+			const rejected = await terminalFallback({ tool, path, absPath, isNew: !existsSync(absPath), oldContent: readBase ?? readDisk(absPath) ?? "", newContent: content, rawBefore: readBase ?? null }, ctx);
+			if (rejected) throw new Error(rejected.reason);
+			mkdirSync(dirname(absPath), { recursive: true });
+			writeFileSync(absPath, content);
+			return;
+		}
+		if (await staged.stage({ toolCallId, tool, path, absPath, content, readBase, ctx, signal })) stagedCalls.add(toolCallId);
+	}
+
+	const stagedRead = (absPath: string) => Buffer.from(staged.read(absPath) ?? readFileSync(absPath, "utf8"), "utf8");
+	const baseEdit = createEditToolDefinition(process.cwd());
+	const baseWrite = createWriteToolDefinition(process.cwd());
+	const baseRead = createReadToolDefinition(process.cwd());
+
+	pi.registerTool({
+		...baseEdit,
+		async execute(toolCallId: string, params: any, signal: AbortSignal | undefined, onUpdate: any, ctx: ExtensionContext): Promise<any> {
+			if (!staging()) return createEditToolDefinition(ctx.cwd).execute(toolCallId, params, signal, onUpdate, ctx);
+			let readBase: string | undefined;
+			const operations = {
+				access: async (absPath: string) => {
+					if (!staged.has(absPath)) await access(absPath, constants.R_OK | constants.W_OK);
+				},
+				readFile: async (absPath: string) => {
+					const buffer = stagedRead(absPath);
+					readBase = buffer.toString("utf8");
+					return buffer;
+				},
+				writeFile: (absPath: string, content: string) => stageWrite(toolCallId, "edit", params.path, absPath, content, readBase, signal, ctx),
+			};
+			return createEditToolDefinition(ctx.cwd, { operations }).execute(toolCallId, params, signal, onUpdate, ctx);
+		},
+	} as any);
+
+	pi.registerTool({
+		...baseWrite,
+		async execute(toolCallId: string, params: any, signal: AbortSignal | undefined, onUpdate: any, ctx: ExtensionContext): Promise<any> {
+			if (!staging()) return createWriteToolDefinition(ctx.cwd).execute(toolCallId, params, signal, onUpdate, ctx);
+			const operations = {
+				mkdir: async () => {},
+				writeFile: (absPath: string, content: string) => stageWrite(toolCallId, "write", params.path, absPath, content, undefined, signal, ctx),
+			};
+			return createWriteToolDefinition(ctx.cwd, { operations }).execute(toolCallId, params, signal, onUpdate, ctx);
+		},
+	} as any);
+
+	pi.registerTool({
+		...baseRead,
+		async execute(toolCallId: string, params: any, signal: AbortSignal | undefined, onUpdate: any, ctx: ExtensionContext): Promise<any> {
+			const absPath = resolveToolPath(ctx.cwd, params.path);
+			const options = staged.has(absPath) ? { operations: { access: async () => {}, readFile: async (path: string) => stagedRead(path) } } : undefined;
+			return createReadToolDefinition(ctx.cwd, options).execute(toolCallId, params, signal, onUpdate, ctx);
+		},
+	} as any);
 
 	pi.registerTool({
 		name: "ask_user",

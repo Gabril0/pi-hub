@@ -113,6 +113,7 @@ export const AGENT_ROUTES = new Set([
 	"GET /api/reviews/:id",
 	"POST /api/reviews/:id/chat",
 	"POST /api/reviews/:id/revision",
+	"POST /api/reviews/:id/promote",
 	"POST /api/reviews/:id/cancel",
 	"POST /api/reviews/:id/applied",
 	"POST /api/reviews/:id/diagram",
@@ -163,7 +164,7 @@ export function createHub({ port = PORT, stateFile, silent = false, openBrowserF
 		if (session.online) store.patch("sessions", session.id, { online: false, status: "offline" });
 	}
 	for (const review of store.all("reviews")) {
-		if (review.status === "pending" || review.status === "thinking") store.patch("reviews", review.id, { status: "stale" });
+		if (["pending", "thinking", "buffered"].includes(review.status)) store.patch("reviews", review.id, { status: "stale" });
 	}
 
 	store.subscribe((message) => {
@@ -306,7 +307,7 @@ export function createHub({ port = PORT, stateFile, silent = false, openBrowserF
 				const gone = store.patch("sessions", sessionId, { online: false, status: "offline", lastSeen: Date.now() });
 				if (gone) announceWorkspaceSlots(workspaceKey(gone));
 				for (const review of store.all("reviews")) {
-					if (review.sessionId === sessionId && (review.status === "pending" || review.status === "thinking")) store.patch("reviews", review.id, { status: "stale" });
+					if (review.sessionId === sessionId && ["pending", "thinking", "buffered"].includes(review.status)) store.patch("reviews", review.id, { status: "stale" });
 				}
 				resolveInbox((item) => item.sessionId === sessionId && ["review", "question"].includes(item.kind), { outcome: "session offline" });
 			}, OFFLINE_GRACE_MS),
@@ -429,22 +430,26 @@ export function createHub({ port = PORT, stateFile, silent = false, openBrowserF
 			chat: [],
 			conflicts,
 			reason: body.reason,
-			status: auto ? "approved" : "pending",
+			status: auto ? "approved" : body.held ? "buffered" : "pending",
 			auto,
 			createdAt: Date.now(),
 			decidedAt: auto ? Date.now() : undefined,
 		});
 		store.appendEvent(body.sessionId, { kind: "review", text: `${auto ? `auto-approved (${auto})` : "review requested"}: ${relPath}`, reviewId: id });
-		if (conflicts.length) {
+		if (conflicts.length && !body.held) {
 			addInbox({ kind: "conflict", sessionId: body.sessionId, refId: id, title: `Conflict on ${relPath}`, body: `Also touched by ${conflicts.map((c) => c.name).join(", ")}`, path: `#/review/${id}` });
 		}
 		if (!auto) {
-			addInbox({ kind: "review", sessionId: body.sessionId, refId: id, title: `Review ${body.tool}: ${relPath}`, body: body.reason ?? "", path: `#/review/${id}` });
-			store.patch("sessions", body.sessionId, { status: "waiting" });
-			maybeOpenBrowser(`#/review/${id}`);
+			if (!body.held) announceReview(review);
 			requestExplain("reviews", id);
 		}
 		return store.get("reviews", id);
+	}
+
+	function announceReview(review) {
+		addInbox({ kind: "review", sessionId: review.sessionId, refId: review.id, title: `Review ${review.tool}: ${review.path}`, body: review.reason ?? "", path: `#/review/${review.id}` });
+		store.patch("sessions", review.sessionId, { status: "waiting" });
+		maybeOpenBrowser(`#/review/${review.id}`);
 	}
 
 	function explainSource(collection, item) {
@@ -757,7 +762,7 @@ export function createHub({ port = PORT, stateFile, silent = false, openBrowserF
 		return null;
 	});
 
-	route("GET", "/api/agent-config", () => ({ summaries: config.summaries, review: { contextLines: config.review.contextLines } }));
+	route("GET", "/api/agent-config", () => ({ summaries: config.summaries, review: { contextLines: config.review.contextLines, lookahead: config.review.lookahead !== false } }));
 
 	route("POST", "/api/open-dashboard", ({ body }) => {
 		lastBrowserOpen = Date.now();
@@ -943,17 +948,26 @@ export function createHub({ port = PORT, stateFile, silent = false, openBrowserF
 	route("POST", "/api/reviews/:id/revision", ({ params, body }) => {
 		const review = store.get("reviews", params.id);
 		if (!review) return [404, { error: "review not found" }];
-		if (!["pending", "thinking"].includes(review.status)) return [409, { error: `review is ${review.status}` }];
+		if (!["pending", "thinking", "buffered"].includes(review.status)) return [409, { error: `review is ${review.status}` }];
 		const revisions = [...review.revisions, { n: review.revisions.length + 1, content: body.content, note: body.note ?? "revised", by: body.by ?? "agent", at: Date.now() }];
 		const chat = body.note ? [...review.chat, { role: "agent", text: body.note, at: Date.now(), revision: revisions.length }] : review.chat;
-		store.patch("reviews", params.id, { revisions, chat, status: review.status === "thinking" ? "pending" : review.status });
-		notify({ kind: "review", title: `Revision v${revisions.length}: ${review.path}`, body: body.note ?? "", path: `#/review/${params.id}` });
+		const oldContent = typeof body.oldContent === "string" ? body.oldContent : review.oldContent;
+		store.patch("reviews", params.id, { revisions, chat, oldContent, stats: lineStats(oldContent, body.content), status: review.status === "thinking" ? "pending" : review.status });
+		if (review.status !== "buffered") notify({ kind: "review", title: `Revision v${revisions.length}: ${review.path}`, body: body.note ?? "", path: `#/review/${params.id}` });
 		return { revision: revisions.length };
+	});
+	route("POST", "/api/reviews/:id/promote", ({ params }) => {
+		const review = store.get("reviews", params.id);
+		if (!review) return [404, { error: "review not found" }];
+		if (review.status !== "buffered") return { status: review.status };
+		const promoted = store.patch("reviews", params.id, { status: "pending", conflicts: findConflicts(review.sessionId, review.absPath) });
+		announceReview(promoted);
+		return { status: "pending" };
 	});
 	route("POST", "/api/reviews/:id/cancel", ({ params, body }) => {
 		const review = store.get("reviews", params.id);
 		if (!review) return [404, { error: "review not found" }];
-		if (["pending", "thinking", "stale"].includes(review.status)) store.patch("reviews", params.id, { status: "cancelled", cancelReason: body.reason });
+		if (["pending", "thinking", "stale", "buffered"].includes(review.status)) store.patch("reviews", params.id, { status: "cancelled", cancelReason: body.reason });
 		resolveInbox((item) => item.refId === params.id && item.kind === "review", { outcome: "cancelled" });
 		refreshWaiting(review.sessionId);
 		return { ok: true };

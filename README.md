@@ -27,6 +27,7 @@ Running several pi agents in tmux panes means constant context switching: which 
 - **Smart collapse.** Hunks that only swap hashes or versions (lockfiles, git revs) fold into one `8 lines · 3 distinct → 1` row:
 
   ![Hash bump collapse](docs/screenshots/review-collapse.png)
+- **Always one diff ahead.** While you read a diff, the agent keeps working against a staged copy of your files, so the next diff is already waiting when you approve. Nothing reaches disk until you approve it. One diff is shown, one is buffered, and the agent pauses on the step after that. If you change or deny the current diff, the agent re-checks the buffered one: an unaffected diff simply appears next, an affected one is updated or thrown away and redone. Commands that change files wait until everything staged is decided. Turn it off in Settings.
 - **How it works, drawn for you.** Complex changes (many lines, several files, new routes, calls, events or data stores) get a Mermaid diagram above the diff, on by default. The hub draws one from the code right away, then the agent replaces it with a diagram of the runtime behavior. Turn it off with the Auto-draw switch or in Settings, or press Draw diagram on any change.
 
   ![Change diagram](docs/screenshots/review-diagram.png)
@@ -180,7 +181,7 @@ Everything else (notification kinds, auto-approve globs, summaries, PR polling, 
 ## Status
 
 - ✅ **Real pi CLI:** `npm run smoke` drives the actual `pi` binary with the extension and a scripted model. The edit is held, approved through the hub, then applied.
-- ✅ **63 automated tests:** approve, partial approve, deny with line comments, approval notes reaching the agent, stale-file guard, ask, revise in place, chat edits that make a new version without deciding, trust mode, hub restart mid-review, bash changesets with revert, checkpoint mode, PR link watching, workspace slots, process discovery parsing, the knowledge graph at every zoom level, change diagrams, agent-token permission limits, test parsers, security checks.
+- ✅ **78 automated tests:** approve, partial approve, deny with line comments, approval notes reaching the agent, stale-file guard, ask, revise in place, chat edits that make a new version without deciding, the one-diff-ahead buffer, trust mode, hub restart mid-review, bash changesets with revert, checkpoint mode, PR link watching, workspace slots, process discovery parsing, the knowledge graph at every zoom level, change diagrams, agent-token permission limits, test parsers, security checks.
 - ⚠️ **Not yet battle-tested** with long real-world sessions on every platform. Bug reports are welcome.
 - **Known limits:**
   - Changes made through `bash` are reviewed after the command runs (as a revertable changeset), not blocked before it. Outside a git repository they are not tracked.

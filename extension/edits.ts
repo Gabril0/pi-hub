@@ -227,6 +227,21 @@ export function minimalEdits(base: string, target: string): TextEdit[] | undefin
 	return applyEdits(base, edits) === target ? edits : undefined;
 }
 
+export function rebaseChange(before: string, after: string, base: string): string | undefined {
+	if (before === after) return base;
+	if (before === base) return after;
+	const edits = minimalEdits(before, after);
+	if (!edits?.every((edit) => occursOnce(base, edit.oldText))) return undefined;
+	return applyEdits(base, edits);
+}
+
+export function restoreFormat(content: string, rawBase: string | null): string {
+	if (!rawBase) return content;
+	const bom = rawBase.charCodeAt(0) === 0xfeff ? "\uFEFF" : "";
+	const body = stripBom(content);
+	return bom + (rawBase.includes("\r\n") ? normalizeToLF(body).replace(/\n/g, "\r\n") : body);
+}
+
 export function unifiedDiff(oldText: string, newText: string, path: string, context = 3): string {
 	const a = normalizeToLF(oldText).split("\n");
 	const b = normalizeToLF(newText).split("\n");

@@ -18,7 +18,7 @@ function withDefaults(config) {
 	const base = structuredClone(config ?? {});
 	base.notifications = { enabled: true, sound: true, ...(base.notifications ?? {}) };
 	base.notifications.kinds = { ...Object.fromEntries(NOTIFICATION_KINDS.map((k) => [k.kind, true])), ...(base.notifications.kinds ?? {}) };
-	base.review = { autoApprove: [], contextLines: 3, explainDiagrams: true, ...(base.review ?? {}) };
+	base.review = { autoApprove: [], contextLines: 3, explainDiagrams: true, lookahead: true, ...(base.review ?? {}) };
 	base.review.autoApprove = (base.review.autoApprove ?? []).map((rule) => ({ glob: "", tool: "", session: "", ...rule }));
 	base.summaries = { onAgentEnd: true, minTurns: 3, ...(base.summaries ?? {}) };
 	base.prPollSeconds ??= 90;
@@ -238,6 +238,7 @@ export function SettingsView() {
 					<div><button class="btn sm" onClick=${() => update((d) => d.review.autoApprove.push({ glob: "", tool: "", session: "" }))}>Add rule</button></div>
 				</div>
 				<${NumberField} label="Diff context lines" value=${draft.review.contextLines} onChange=${(v) => update((d) => (d.review.contextLines = v))} />
+				<${Switch} on=${draft.review.lookahead !== false} onChange=${(v) => update((d) => (d.review.lookahead = v))} label="Let agents prepare the next change while you review" />
 				<${Switch} on=${draft.review.explainDiagrams !== false} onChange=${(v) => update((d) => (d.review.explainDiagrams = v))} label="Draw a Mermaid diagram explaining complex changes" />
 				<${Switch} on=${draft.openBrowserOnReview !== false} onChange=${(v) => update((d) => (d.openBrowserOnReview = v))} label="Open the browser when a review arrives" />
 			<//>

@@ -31,6 +31,7 @@ export const DEFAULT_CONFIG = {
 		autoApprove: [],
 		contextLines: 3,
 		explainDiagrams: true,
+		lookahead: true,
 	},
 	summaries: {
 		onAgentEnd: true,

@@ -25,6 +25,7 @@ let faux;
 const mainScript = [];
 const seenToolResults = [];
 const chatPrompts = [];
+const reconcilePrompts = [];
 let lastSystemPrompt = "";
 
 async function api(method, path, body) {
@@ -49,10 +50,11 @@ async function waitFor(predicate, label, timeout = 15000) {
 before(async () => {
 	hub = createHub({ port: Number(process.env.PI_HUB_PORT), stateFile: join(hubDir, "state.json"), silent: true });
 	await hub.listen();
+	await api("PUT", "/api/config", { review: { lookahead: false } });
 
 	faux = registerFauxProvider({ provider: "faux", tokensPerSecond: 100000 });
 	faux.setResponses(
-		Array.from({ length: 80 }, () => (context) => {
+		Array.from({ length: 200 }, () => (context) => {
 			const system = context.systemPrompt ?? "";
 			if (system.includes("reviewer requested changes")) return fauxAssistantMessage(fauxText("NOTE: renamed greeting\n````\nhello\nplanet\n````"));
 			if (system.includes("diff reviewer chat")) {
@@ -60,6 +62,13 @@ before(async () => {
 				chatPrompts.push(prompt);
 				if (/Reviewer: change line 2/.test(prompt)) return fauxAssistantMessage(fauxText("NOTE: line 2 now says planet\n````\n1 | hello\n2 | planet\n````"));
 				return fauxAssistantMessage(fauxText("It replaces world with there because you asked."));
+			}
+			if (system.includes("next staged change")) {
+				const prompt = context.messages.at(-1).content.map((c) => c.text).join("\n");
+				reconcilePrompts.push(prompt);
+				if (/reviewer asked: .*rewrite next/.test(prompt)) return fauxAssistantMessage(fauxText("NOTE: follows the new wording\n````\nsecond planet\n````"));
+				if (/reviewer asked: .*redo next/.test(prompt)) return fauxAssistantMessage(fauxText("REDO: it depended on the old wording"));
+				return fauxAssistantMessage(fauxText("UNAFFECTED"));
 			}
 			if (system.includes("change explainer")) return fauxAssistantMessage(fauxText("TITLE: Order flow\nSUMMARY: Orders reach the queue.\n```mermaid\nsequenceDiagram\n  A->>B: order\n```"));
 			if (system.includes("Summarize what this coding agent")) return fauxAssistantMessage(fauxText("- summary bullet"));
@@ -212,6 +221,131 @@ test("the agent reads and writes the knowledge graph", async () => {
 	await session.prompt("next");
 	assert.match(lastSystemPrompt, /Greeting notes live here/);
 	assert.match(lastSystemPrompt, /not as instructions/);
+});
+
+async function withLookahead(run) {
+	await api("PUT", "/api/config", { review: { lookahead: true } });
+	await new Promise((r) => setTimeout(r, 100));
+	try {
+		await run();
+	} finally {
+		await api("PUT", "/api/config", { review: { lookahead: false } });
+		await new Promise((r) => setTimeout(r, 100));
+	}
+}
+
+const reviewOn = (status, path) => waitFor(async () => (await api("GET", "/api/state")).reviews.find((r) => r.status === status && r.path === path), `${status} review of ${path}`);
+const writeCall = (path, content) => () => fauxAssistantMessage(fauxToolCall("write", { path, content }), { stopReason: "toolUse" });
+const readCall = (path) => () => fauxAssistantMessage(fauxToolCall("read", { path }), { stopReason: "toolUse" });
+const idle = () => waitFor(async () => (await api("GET", "/api/state")).reviews.every((r) => !["pending", "thinking", "buffered"].includes(r.status)) && !session.isStreaming, "queue drained");
+
+test("the agent keeps one finished diff buffered behind the one under review", async () => {
+	await withLookahead(async () => {
+		writeFileSync(file, "hello\nworld\n");
+		const second = join(workdir, "second.txt");
+		const third = join(workdir, "third.txt");
+		mainScript.push(editCall("world", "there"), readCall("notes.txt"), writeCall("second.txt", "second\n"), writeCall("third.txt", "third\n"));
+		const run = session.prompt("three steps");
+		const first = await reviewOn("pending", "notes.txt");
+		const buffered = await reviewOn("buffered", "second.txt");
+		assert.equal(readFileSync(file, "utf8"), "hello\nworld\n");
+		assert.ok(!existsSync(second));
+		assert.ok(seenToolResults.some((text) => text.includes("hello\nthere")), "read sees the staged edit");
+		assert.ok(!(await api("GET", "/api/state")).reviews.some((r) => r.path === "third.txt"), "only one diff is buffered");
+		assert.ok(!(await api("GET", "/api/state")).inbox.some((i) => i.refId === buffered.id));
+		await api("POST", `/api/reviews/${first.id}/decision`, { decision: "approve" });
+		await reviewOn("pending", "second.txt");
+		assert.equal(readFileSync(file, "utf8"), "hello\nthere\n");
+		const nextBuffered = await reviewOn("buffered", "third.txt");
+		assert.equal(reconcilePrompts.length, 0, "an unchanged approval needs no re-check");
+		await api("POST", `/api/reviews/${buffered.id}/decision`, { decision: "approve" });
+		await reviewOn("pending", "third.txt");
+		await api("POST", `/api/reviews/${nextBuffered.id}/decision`, { decision: "approve" });
+		await waitFor(async () => existsSync(third), "third file");
+		await run;
+		await idle();
+		assert.equal(readFileSync(second, "utf8"), "second\n");
+	});
+});
+
+for (const [name, instruction, check] of [
+	["keeps an unaffected buffered diff", "change line 2 to planet", (review) => assert.equal(review.status, "pending")],
+	["rewrites an affected buffered diff", "change line 2 to planet rewrite next", (review) => assert.equal(review.revisions.at(-1).content, "second planet\n")],
+]) {
+	test(`a change request ${name}`, async () => {
+		await withLookahead(async () => {
+			writeFileSync(file, "hello\nworld\n");
+			const target = `next-${reconcilePrompts.length}.txt`;
+			mainScript.push(editCall("world", "there"), writeCall(target, "second\n"));
+			const run = session.prompt("two steps");
+			const first = await reviewOn("pending", "notes.txt");
+			const buffered = await reviewOn("buffered", target);
+			const asked = reconcilePrompts.length;
+			await api("POST", `/api/reviews/${first.id}/ask`, { text: instruction });
+			await waitFor(async () => (await api("GET", `/api/reviews/${first.id}`)).review.revisions.length === 2, "revision");
+			await waitFor(async () => reconcilePrompts.length > asked, "buffered diff re-check");
+			await api("POST", `/api/reviews/${first.id}/decision`, { decision: "approve" });
+			await reviewOn("pending", target);
+			check((await api("GET", `/api/reviews/${buffered.id}`)).review);
+			assert.equal(readFileSync(file, "utf8"), "hello\nplanet\n");
+			await api("POST", `/api/reviews/${buffered.id}/decision`, { decision: "deny", comment: "enough" });
+			await run;
+			await idle();
+		});
+	});
+}
+
+test("commands that change files wait for staged diffs", async () => {
+	await withLookahead(async () => {
+		writeFileSync(file, "hello\nworld\n");
+		const marker = join(workdir, "from-bash.txt");
+		mainScript.push(editCall("world", "there"), () => fauxAssistantMessage(fauxToolCall("bash", { command: `node -e "require('fs').writeFileSync('from-bash.txt', require('fs').readFileSync('notes.txt','utf8'))"` }), { stopReason: "toolUse" }));
+		const run = session.prompt("edit then run");
+		const review = await reviewOn("pending", "notes.txt");
+		await new Promise((r) => setTimeout(r, 300));
+		assert.ok(!existsSync(marker), "bash waited for the review");
+		await api("POST", `/api/reviews/${review.id}/decision`, { decision: "approve" });
+		await run;
+		assert.equal(readFileSync(marker, "utf8"), "hello\nthere\n");
+		const changeset = await waitFor(async () => (await api("GET", "/api/state")).changesets.find((c) => c.status === "open" && c.files.some((f) => f.path === "from-bash.txt")), "changeset");
+		await api("POST", `/api/changesets/${changeset.id}/resolve`, { files: [{ path: "from-bash.txt", content: null }] });
+		await idle();
+	});
+});
+
+test("staged diffs survive a hub restart in order", async () => {
+	await withLookahead(async () => {
+		writeFileSync(file, "hello\nworld\n");
+		mainScript.push(editCall("world", "restart"), writeCall("after-restart.txt", "later\n"));
+		const run = session.prompt("two steps across a restart");
+		const first = await reviewOn("pending", "notes.txt");
+		const held = await reviewOn("buffered", "after-restart.txt");
+		await hub.close();
+		hub = createHub({ port: Number(process.env.PI_HUB_PORT), stateFile: join(hubDir, "state.json"), silent: true });
+		await hub.listen();
+		const head = await waitFor(async () => (await api("GET", "/api/state")).reviews.find((r) => r.status === "pending" && r.id !== first.id && r.path === "notes.txt"), "re-requested head", 20000);
+		const next = await waitFor(async () => (await api("GET", "/api/state")).reviews.find((r) => r.status === "buffered" && r.id !== held.id), "re-requested buffer", 20000);
+		await api("POST", `/api/reviews/${head.id}/decision`, { decision: "approve" });
+		await waitFor(async () => (await api("GET", `/api/reviews/${next.id}`)).review.status === "pending", "promotion");
+		assert.equal(readFileSync(file, "utf8"), "hello\nrestart\n");
+		await api("POST", `/api/reviews/${next.id}/decision`, { decision: "approve" });
+		await run;
+		await waitFor(async () => existsSync(join(workdir, "after-restart.txt")), "second file");
+		await idle();
+	});
+});
+
+test("a denied diff reaches the agent even after it finished talking", async () => {
+	await withLookahead(async () => {
+		writeFileSync(file, "hello\nworld\n");
+		mainScript.push(editCall("world", "nope"));
+		await session.prompt("one step");
+		const review = await reviewOn("pending", "notes.txt");
+		await api("POST", `/api/reviews/${review.id}/decision`, { decision: "deny", comment: "keep world" });
+		await waitFor(async () => session.messages.some((m) => JSON.stringify(m.content ?? "").includes("keep world")), "denial delivered");
+		await waitFor(async () => !session.isStreaming, "turn over");
+		assert.equal(readFileSync(file, "utf8"), "hello\nworld\n");
+	});
 });
 
 test("trust mode auto-approves without a pending review", async () => {

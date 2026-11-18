@@ -60,6 +60,10 @@ const rustReview = await call("POST", "/api/reviews", { sessionId: "demo-rust", 
 await call("POST", `/api/reviews/${rustReview.id}/chat`, { role: "user", text: "why switch the if/else to a match?" });
 await call("POST", `/api/reviews/${rustReview.id}/chat`, { role: "agent", text: "`match n % 2` makes both arms explicit, so **0 → `tung`** and anything else → `sahur`. `chant(4)` then prints `sahur tung sahur tung`." });
 
+const bufferedNext = new Map();
+const chantTest = await call("POST", "/api/reviews", { sessionId: "demo-rust", tool: "write", path: "src/chant_test.rs", absPath: posix.join(work, "tung-sahur", "src", "chant_test.rs"), isNew: true, oldContent: "", newContent: '#[test]\nfn chants_in_order() {\n    assert_eq!(chant(4), "sahur tung sahur tung");\n}\n', intent: "Covering `chant` with a test while you review the parity change.", held: true });
+bufferedNext.set(rustReview.id, chantTest.id);
+
 await call("POST", "/api/sessions/demo-api/events", {
 	events: [
 		{ kind: "agent_start", prompt: "Bump every acme_* crate to the SDK release that adds request retries, then re-run the API tests." },
@@ -159,6 +163,11 @@ async function scriptedAgent(sessionId) {
 			const data = frame.split("\n").filter((l) => l.startsWith("data: ")).map((l) => l.slice(6)).join("");
 			if (!data) continue;
 			const message = JSON.parse(data);
+			if (message.type === "review_decision" && bufferedNext.has(message.reviewId)) {
+				await new Promise((r) => setTimeout(r, 120));
+				await call("POST", `/api/reviews/${bufferedNext.get(message.reviewId)}/promote`, {});
+				bufferedNext.delete(message.reviewId);
+			}
 			if (message.type !== "review_ask" && message.type !== "review_revise") continue;
 			const { review } = await call("GET", `/api/reviews/${message.reviewId}`);
 			const latest = review.revisions.at(-1).content;

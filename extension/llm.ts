@@ -1,6 +1,6 @@
 import { complete, type Message } from "@mariozechner/pi-ai";
 import { convertToLlm, serializeConversation, type ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { EXPLAIN_FORMAT, finishRevision, extractRevision, numberLines, parseChatReply, parseExplainReply, REVISION_FORMAT, type ChatReply, type ExplainReply } from "./chat-reply";
+import { EXPLAIN_FORMAT, finishRevision, extractRevision, numberLines, parseChatReply, parseExplainReply, parseReconcileReply, REVISION_FORMAT, type ChatReply, type ExplainReply, type ReconcileReply } from "./chat-reply";
 import { unifiedDiff } from "./edits";
 
 const MAX_FILE_CHARS = 120_000;
@@ -117,6 +117,44 @@ export async function reviseProposal(ctx: ExtensionContext, review: ReviewContex
 	const revision = extractRevision(output);
 	if (!revision) throw new Error("model did not return a fenced file");
 	return finishRevision(revision, review.newContent);
+}
+
+export interface BufferedCheck {
+	changedPath: string;
+	previous: string;
+	current: string;
+	why: string;
+	nextPath: string;
+	nextBefore: string;
+	nextAfter: string;
+	conflict: boolean;
+}
+
+export async function reconcileBufferedChange(ctx: ExtensionContext, check: BufferedCheck, signal?: AbortSignal): Promise<ReconcileReply> {
+	const system =
+		"You are the coding agent. You already prepared your next staged change while the reviewer was reading the previous one, and the previous one has now changed. Decide whether the next staged change is still right.\n" +
+		"- If it still works as is, output exactly: UNAFFECTED\n" +
+		"- If it needs adjusting, output the complete corrected next file in this format, keeping everything unrelated identical:\n" +
+		`${REVISION_FORMAT}\n` +
+		"- If it no longer makes sense, output exactly: REDO: <short reason>";
+	const prompt = [
+		"Conversation so far:",
+		recentConversation(ctx, 8_000),
+		"",
+		`What happened to the previous change in ${check.changedPath}: ${check.why}`,
+		"How that file's reviewed content moved:",
+		"```diff",
+		unifiedDiff(check.previous, check.current, check.changedPath, 3),
+		"```",
+		"",
+		`Your next staged change to ${check.nextPath}${check.conflict ? " (it no longer applies cleanly on the new content, so you must rewrite it or say REDO)" : ""}:`,
+		"```diff",
+		unifiedDiff(check.nextBefore, check.nextAfter, check.nextPath, 3),
+		"```",
+		"",
+		`Current content ${check.nextPath} would start from:\n\`\`\`\`\n${check.nextBefore.length <= MAX_FILE_CHARS ? check.nextBefore : "(too large to include)"}\n\`\`\`\``,
+	].join("\n");
+	return parseReconcileReply(await ask(ctx, system, prompt, signal), check.nextAfter);
 }
 
 export interface ExplainFile {
