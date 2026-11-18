@@ -3,6 +3,7 @@ import { alignBlock, buildHunks, contentWithBlocks, diffOps, escape, highlightLi
 import { api, openChangesets, pendingReviews, sessionOf, sorted, toast, useStore } from "../lib/store.js";
 import { Icon } from "../lib/icons.js";
 import { Empty, LineStats, Markdown, Modal, SessionChip, Status, colorOf, isTyping, navigate, sessionName, timeAgo } from "../lib/util.js";
+import { ExplainPanel } from "./diagram.js";
 
 export function DiffStat({ added, removed }) {
 	const total = added + removed || 1;
@@ -641,6 +642,7 @@ export function ReviewView({ id }) {
 			: null}
 
 		<${WhyBlock} intent=${review.intent} step=${review.step} />
+		<${ExplainPanel} kind="reviews" item=${summary ?? review} revision=${revisions.at(-1)?.n} />
 
 		<div class="review-body">
 			<div class="card diff-card">

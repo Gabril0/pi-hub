@@ -9,6 +9,9 @@ import { pickColor } from "./colors.mjs";
 import { HOST, HUB_DIR, LOG_FILE, PORT, ensureHubDir, loadConfig, mergeDeep, readToken, saveConfig } from "./config.mjs";
 import { fetchPr, fetchPrForCwd, ghAvailable, isPrRef, prKey, prTransitions } from "./github.mjs";
 import { discoverPiProcesses } from "./discovery.mjs";
+import { changeComplexity, cleanMermaid } from "./change-diagram.mjs";
+import { createKnowledge } from "./knowledge.mjs";
+import { ROOT_ID } from "./knowledge-graph.mjs";
 import { createNotifier } from "./notify.mjs";
 import { Store, newId, publicView } from "./store.mjs";
 import { createWorktree, focusSession, openBrowser, spawnAgent } from "./terminal.mjs";
@@ -112,7 +115,14 @@ export const AGENT_ROUTES = new Set([
 	"POST /api/reviews/:id/revision",
 	"POST /api/reviews/:id/cancel",
 	"POST /api/reviews/:id/applied",
+	"POST /api/reviews/:id/diagram",
 	"POST /api/changesets",
+	"GET /api/changesets/:id",
+	"POST /api/changesets/:id/diagram",
+	"GET /api/knowledge/context",
+	"GET /api/knowledge/brief",
+	"POST /api/knowledge/notes",
+	"POST /api/knowledge/links",
 	"POST /api/questions",
 	"GET /api/inbox/:id",
 	"POST /api/inbox/:id/resolve",
@@ -125,7 +135,7 @@ export const AGENT_ROUTES = new Set([
 	"POST /api/shutdown",
 ]);
 
-export function createHub({ port = PORT, stateFile, silent = false, openBrowserFn = openBrowser, onShutdown, humanToken: fixedHumanToken, discover = discoverPiProcesses } = {}) {
+export function createHub({ port = PORT, stateFile, silent = false, openBrowserFn = openBrowser, onShutdown, humanToken: fixedHumanToken, discover = discoverPiProcesses, knowledgeDir } = {}) {
 	ensureHubDir();
 	const token = readToken();
 	const humanToken = fixedHumanToken ?? process.env.PI_HUB_HUMAN_TOKEN ?? randomBytes(24).toString("hex");
@@ -137,6 +147,8 @@ export function createHub({ port = PORT, stateFile, silent = false, openBrowserF
 	const runningTests = new Map();
 	let lastBrowserOpen = 0;
 	let actualPort = port;
+
+	const knowledge = createKnowledge({ store, dir: knowledgeDir ?? join(stateFile ? dirname(stateFile) : HUB_DIR, "knowledge"), pathKey, log });
 
 	const baseUrl = () => `http://${HOST}:${actualPort}/?token=${humanToken}`;
 	const notify = silent ? () => {} : createNotifier(() => config, baseUrl);
@@ -277,6 +289,7 @@ export function createHub({ port = PORT, stateFile, silent = false, openBrowserF
 			lastSeen: Date.now(),
 		});
 		log(`register ${session.id} ${session.cwd}`);
+		if (session.isGitRepo && session.repoRoot && existsSync(session.repoRoot)) void knowledge.addRepo(session.repoRoot, "session").catch((error) => log(`knowledge add failed: ${error.message}`));
 		return session;
 	}
 
@@ -352,6 +365,7 @@ export function createHub({ port = PORT, stateFile, silent = false, openBrowserF
 			case "agent_end": {
 				const duration = session.runStartedAt ? now - session.runStartedAt : undefined;
 				store.patch("sessions", sessionId, { status: event.error ? "error" : "idle", lastActivity: now, lastError: event.error });
+				knowledge.touchPath(session.repoRoot || session.cwd);
 				store.appendEvent(sessionId, { kind: "agent_end", text: excerpt(event.text, 600), error: event.error });
 				if (event.text || event.error) {
 					store.upsert("results", {
@@ -428,8 +442,55 @@ export function createHub({ port = PORT, stateFile, silent = false, openBrowserF
 			addInbox({ kind: "review", sessionId: body.sessionId, refId: id, title: `Review ${body.tool}: ${relPath}`, body: body.reason ?? "", path: `#/review/${id}` });
 			store.patch("sessions", body.sessionId, { status: "waiting" });
 			maybeOpenBrowser(`#/review/${id}`);
+			requestExplain("reviews", id);
 		}
-		return review;
+		return store.get("reviews", id);
+	}
+
+	function explainSource(collection, item) {
+		if (collection === "reviews") {
+			const latest = item.revisions.at(-1);
+			return { files: [{ path: item.path, before: item.oldContent ?? "", after: latest?.content ?? "" }], anchor: item.absPath, revision: latest?.n };
+		}
+		return { files: item.files.map((f) => ({ path: f.path, before: f.before ?? "", after: f.after ?? "", binary: f.binary, tooLarge: f.tooLarge })), anchor: item.root };
+	}
+
+	function requestExplain(collection, id, { force = false } = {}) {
+		const item = store.get(collection, id);
+		if (!item) return undefined;
+		const { files, anchor, revision } = explainSource(collection, item);
+		const { complex, reasons } = changeComplexity(files);
+		if (!force && (config.review?.explainDiagrams === false || !complex)) return undefined;
+		const drawn = knowledge.diagramFor(files, anchor);
+		const sent = sendToSession(item.sessionId, { type: collection === "reviews" ? "review_explain" : "changeset_explain", id, reasons });
+		const explain = {
+			status: sent ? "drawing" : drawn ? "ready" : "failed",
+			source: "code",
+			title: drawn?.title,
+			summary: drawn?.summary,
+			mermaid: drawn?.mermaid,
+			fallback: drawn?.mermaid,
+			revision,
+			reasons,
+			error: sent || drawn ? undefined : "The agent is offline and the code alone was not enough to draw this change.",
+			at: Date.now(),
+		};
+		store.patch(collection, id, { explain });
+		return explain;
+	}
+
+	function saveDiagram(collection, id, body) {
+		const item = store.get(collection, id);
+		if (!item) return [404, { error: "not found" }];
+		const current = item.explain ?? {};
+		const mermaid = body.error ? undefined : cleanMermaid(body.mermaid);
+		if (!mermaid) {
+			const error = String(body.error ?? "The agent's diagram was not valid Mermaid.").slice(0, 300);
+			store.patch(collection, id, { explain: { ...current, status: current.mermaid ? "ready" : "failed", error } });
+			return body.error ? { ok: false } : [400, { error }];
+		}
+		store.patch(collection, id, { explain: { ...current, status: "ready", source: "agent", title: excerpt(body.title, 120) || current.title, summary: excerpt(body.summary, 500) || current.summary, mermaid, error: undefined, at: Date.now() } });
+		return { ok: true };
 	}
 
 	function decideReview(id, body) {
@@ -899,6 +960,7 @@ export function createHub({ port = PORT, stateFile, silent = false, openBrowserF
 	});
 	route("POST", "/api/reviews/:id/applied", ({ params, body }) => {
 		const review = store.patch("reviews", params.id, { applied: body.ok !== false, applyError: body.error });
+		if (review && body.ok !== false) knowledge.touchPath(review.absPath);
 		return review ? { ok: true } : [404, { error: "review not found" }];
 	});
 
@@ -928,8 +990,14 @@ export function createHub({ port = PORT, stateFile, silent = false, openBrowserF
 		const label = changeset.kind === "turn" ? "Turn changes" : "Changes made by bash";
 		addInbox({ kind: "changeset", sessionId: body.sessionId, refId: changeset.id, title: `${label}: ${files.length} file${files.length === 1 ? "" : "s"} (+${stats.added} −${stats.removed})`, body: changeset.title, path: `#/changeset/${changeset.id}` });
 		store.appendEvent(body.sessionId, { kind: "changeset", text: `${label}: ${files.map((f) => f.path).slice(0, 6).join(", ")}`, changesetId: changeset.id });
+		knowledge.touchPath(changeset.root);
+		requestExplain("changesets", changeset.id);
 		return { id: changeset.id };
 	});
+	route("POST", "/api/reviews/:id/explain", ({ params }) => requestExplain("reviews", params.id, { force: true }) ?? [404, { error: "review not found" }]);
+	route("POST", "/api/reviews/:id/diagram", ({ params, body }) => saveDiagram("reviews", params.id, body));
+	route("POST", "/api/changesets/:id/explain", ({ params }) => requestExplain("changesets", params.id, { force: true }) ?? [404, { error: "changeset not found" }]);
+	route("POST", "/api/changesets/:id/diagram", ({ params, body }) => saveDiagram("changesets", params.id, body));
 	route("GET", "/api/changesets/:id", ({ params }) => {
 		const changeset = store.get("changesets", params.id);
 		return changeset ? { changeset } : [404, { error: "changeset not found" }];
@@ -1097,6 +1165,62 @@ export function createHub({ port = PORT, stateFile, silent = false, openBrowserF
 		return { command: defaultTestCommand(readdirSync(cwd)) };
 	});
 
+	const agentSession = (role, body) => (role === "agent" ? store.get("sessions", body.sessionId) : undefined);
+	const knowledgeResult = (result) => (result.error ? [result.status, { error: result.error }] : result);
+
+	route("GET", "/api/knowledge/view", ({ url }) => {
+		const view = knowledge.view(url.searchParams.get("focus") || ROOT_ID);
+		return view ? { ...view, docsDir: knowledge.dir } : [404, { error: "not in the graph" }];
+	});
+	route("GET", "/api/knowledge/search", ({ url }) => ({ results: knowledge.search(url.searchParams.get("q")) }));
+	route("GET", "/api/knowledge/context", ({ url }) => {
+		const found = knowledge.describe(url.searchParams.get("target") ?? "", store.get("sessions", url.searchParams.get("session")));
+		return found ?? [404, { error: `nothing in the graph matches "${url.searchParams.get("target")}"` }];
+	});
+	route("GET", "/api/knowledge/brief", ({ url }) => {
+		const path = url.searchParams.get("path") ?? "";
+		return { text: knowledge.briefForPath(path), notes: knowledge.notesForPrompt(path) };
+	});
+	route("POST", "/api/knowledge/repos", async ({ body }) => {
+		const path = String(body.path ?? "").trim();
+		if (!isAbsolute(path) || !existsSync(path) || !statSync(path).isDirectory()) return [400, { error: "path must be an existing absolute folder" }];
+		return { repo: await knowledge.addRepo(path) };
+	});
+	route("DELETE", "/api/knowledge/repos/:id", ({ params }) => {
+		knowledge.removeRepo(params.id);
+		return { ok: true };
+	});
+	route("POST", "/api/knowledge/scan", ({ body }) => {
+		const repos = body.repo ? store.all("repos").filter((r) => r.id === body.repo) : store.all("repos");
+		for (const repo of repos) knowledge.schedule(repo.id, 10);
+		return { scanning: repos.length };
+	});
+	route("POST", "/api/knowledge/notes", ({ body, role }) => {
+		const session = agentSession(role, body);
+		return knowledgeResult(knowledge.addNote({ target: body.target, text: body.text, role, session, name: session ? sessionLabel(session) : undefined }));
+	});
+	route("DELETE", "/api/knowledge/notes/:id", ({ params }) => {
+		store.remove("notes", params.id);
+		return { ok: true };
+	});
+	route("POST", "/api/knowledge/links", ({ body, role }) => {
+		const session = agentSession(role, body);
+		return knowledgeResult(knowledge.addLink({ from: body.from, to: body.to, label: body.label, role, session, name: session ? sessionLabel(session) : undefined }));
+	});
+	route("DELETE", "/api/knowledge/links/:id", ({ params }) => {
+		store.remove("graphLinks", params.id);
+		return { ok: true };
+	});
+	route("POST", "/api/knowledge/ask", ({ body }) => {
+		const target = String(body.target ?? ROOT_ID);
+		const repo = knowledge.repoOf(target);
+		const candidates = store.all("sessions").filter((s) => s.online && (!repo || knowledge.repoForPath(s.repoRoot || s.cwd || "")?.id === repo || store.get("repos", repo)?.name === s.repo));
+		const session = candidates.find((s) => s.status === "idle") ?? candidates[0];
+		if (!session) return [409, { error: "No connected agent is working in this repository." }];
+		const text = `Study "${knowledge.labelOf(target) ?? target}" (graph node ${target}) without changing any code. Then record what you learn with the hub_knowledge tool: a short note on what each important part is responsible for, and a link for any relationship between systems that static scanning would miss.`;
+		return { delivered: sendToSession(session.id, { type: "user_message", text, deliverAs: "followUp" }), sessionId: session.id };
+	});
+
 	route("POST", "/api/prs/refresh", async () => {
 		await pollPrs();
 		return { prs: store.all("prs") };
@@ -1149,7 +1273,7 @@ export function createHub({ port = PORT, stateFile, silent = false, openBrowserF
 			const values = url.pathname.match(match.regex).slice(1);
 			const params = Object.fromEntries(match.keys.map((key, i) => [key, decodeURIComponent(values[i])]));
 			const body = ["POST", "PUT", "PATCH"].includes(req.method) ? await readBody(req) : {};
-			const result = await match.handler({ req, res, url, params, body });
+			const result = await match.handler({ req, res, url, params, body, role });
 			if (result === null) return;
 			if (Array.isArray(result)) return json(res, result[0], result[1]);
 			json(res, 200, result);
@@ -1194,6 +1318,7 @@ export function createHub({ port = PORT, stateFile, silent = false, openBrowserF
 	}
 
 	function close() {
+		knowledge.close();
 		clearTimeout(prTimer);
 		clearInterval(pruneTimer);
 		for (const timer of offlineTimers.values()) clearTimeout(timer);
@@ -1205,7 +1330,7 @@ export function createHub({ port = PORT, stateFile, silent = false, openBrowserF
 		return new Promise((done) => server.close(() => done()));
 	}
 
-	return { listen, close, store, token, humanToken, url: baseUrl, get port() {
+	return { listen, close, store, knowledge, token, humanToken, url: baseUrl, get port() {
 		return actualPort;
 	} };
 }

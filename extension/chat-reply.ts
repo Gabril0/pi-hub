@@ -29,6 +29,27 @@ export function parseChatReply(output: string, previous: string): ChatReply {
 	return { kind: "answer", text: output };
 }
 
+export interface ExplainReply {
+	title: string;
+	summary: string;
+	mermaid: string;
+}
+
+export const EXPLAIN_FORMAT =
+	"TITLE: <short title for the diagram>\n" +
+	"SUMMARY: <one or two sentences on how the systems work together after this change>\n" +
+	"```mermaid\n<the diagram>\n```";
+
+export function parseExplainReply(output: string): ExplainReply | undefined {
+	const fence = output.match(/```+\s*mermaid[^\n]*\n([\s\S]*?)\n\s*```/i);
+	if (!fence) return undefined;
+	return {
+		title: output.match(/^TITLE:\s*(.+)$/m)?.[1]?.trim() ?? "",
+		summary: output.match(/^SUMMARY:\s*(.+)$/m)?.[1]?.trim() ?? "",
+		mermaid: fence[1].trim(),
+	};
+}
+
 export function extractRevision(output: string): { note: string; content: string } | undefined {
 	const noteMatch = output.match(/^NOTE:\s*(.+)$/m);
 	const fence = output.match(/(`{3,}|~{3,})[^\n]*\n([\s\S]*?)\n\1\s*$/m) ?? output.match(/(`{3,}|~{3,})[^\n]*\n([\s\S]*)\n\1/);

@@ -3,6 +3,7 @@ import { contentWithBlocks, diffOps, stats } from "../lib/diff.js";
 import { api, openChangesets, sessionOf, toast, useStore } from "../lib/store.js";
 import { Empty, SessionChip, colorOf, isTyping, navigate, timeAgo } from "../lib/util.js";
 import { ChangesetKind, ChangesetStatus, DiffStat, DiffViewer, loadPrefs, savePrefs } from "./review.js";
+import { ExplainPanel } from "./diagram.js";
 
 const FILE_STATUS = { added: "A", modified: "M", deleted: "D" };
 const REVERT_LABELS = { on: "keep", off: "reverted — restores original", title: "Keep this hunk, or revert it to the original" };
@@ -198,6 +199,8 @@ export function ChangesetView({ id }) {
 			<div class=${`cs-title ${changeset.kind === "bash" ? "mono" : ""}`} title=${changeset.title}>${changeset.title || fallbackTitle}</div>
 			${changeset.root ? html`<span class="tiny faint mono ellipsis cs-root" title=${changeset.root}>${changeset.root}</span>` : null}
 		</div>
+
+		<${ExplainPanel} kind="changesets" item=${summary ?? changeset} />
 
 		<div class="cs-body">
 			<div class="cs-side">

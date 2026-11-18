@@ -25,6 +25,7 @@ let faux;
 const mainScript = [];
 const seenToolResults = [];
 const chatPrompts = [];
+let lastSystemPrompt = "";
 
 async function api(method, path, body) {
 	const res = await fetch(`http://127.0.0.1:${process.env.PI_HUB_PORT}${path}`, {
@@ -51,7 +52,7 @@ before(async () => {
 
 	faux = registerFauxProvider({ provider: "faux", tokensPerSecond: 100000 });
 	faux.setResponses(
-		Array.from({ length: 40 }, () => (context) => {
+		Array.from({ length: 80 }, () => (context) => {
 			const system = context.systemPrompt ?? "";
 			if (system.includes("reviewer requested changes")) return fauxAssistantMessage(fauxText("NOTE: renamed greeting\n````\nhello\nplanet\n````"));
 			if (system.includes("diff reviewer chat")) {
@@ -60,7 +61,9 @@ before(async () => {
 				if (/Reviewer: change line 2/.test(prompt)) return fauxAssistantMessage(fauxText("NOTE: line 2 now says planet\n````\n1 | hello\n2 | planet\n````"));
 				return fauxAssistantMessage(fauxText("It replaces world with there because you asked."));
 			}
+			if (system.includes("change explainer")) return fauxAssistantMessage(fauxText("TITLE: Order flow\nSUMMARY: Orders reach the queue.\n```mermaid\nsequenceDiagram\n  A->>B: order\n```"));
 			if (system.includes("Summarize what this coding agent")) return fauxAssistantMessage(fauxText("- summary bullet"));
+			lastSystemPrompt = system;
 			const last = context.messages.at(-1);
 			if (last?.role === "toolResult") seenToolResults.push(last.content.map((c) => c.text).join("\n"));
 			const step = mainScript.shift();
@@ -176,6 +179,39 @@ test("PR links in replies are watched for the session", async () => {
 	assert.deepEqual(watched, [{ repo: "octo-org/other-repo", number: 42 }]);
 	const rejected = await api("POST", "/api/sessions/e2e-agent/watch-prs", { refs: [{ repo: "evil/x; rm -rf /", number: 1 }, { repo: "a/b", number: 0 }] });
 	assert.deepEqual(rejected.added, []);
+});
+
+test("a complex change gets a diagram from the agent while it waits for review", async () => {
+	const content = 'export function place() {\n\tconst a = 1;\n\tconst b = 2;\n\tfetch("/orders", { method: "POST" });\n\tbus.publish("orders.placed");\n\treturn a + b;\n}\n';
+	mainScript.push(() => fauxAssistantMessage(fauxToolCall("write", { path: "place.ts", content }), { stopReason: "toolUse" }));
+	const run = session.prompt("add order placement");
+	const review = await waitFor(async () => (await api("GET", "/api/state")).reviews.find((r) => r.status === "pending" && r.path === "place.ts"), "pending review");
+	const explain = await waitFor(async () => {
+		const { review: full } = await api("GET", `/api/reviews/${review.id}`);
+		return full.explain?.source === "agent" ? full.explain : undefined;
+	}, "agent diagram");
+	assert.equal(explain.title, "Order flow");
+	assert.match(explain.mermaid, /^sequenceDiagram/);
+	assert.match(explain.fallback, /orders\.placed/);
+	assert.equal((await api("GET", `/api/reviews/${review.id}`)).review.status, "pending");
+	await api("POST", `/api/reviews/${review.id}/decision`, { decision: "deny", comment: "not now" });
+	await run;
+});
+
+test("the agent reads and writes the knowledge graph", async () => {
+	writeFileSync(file, "hello\nworld\n");
+	await api("POST", "/api/knowledge/repos", { path: workdir });
+	await waitFor(async () => (await api("GET", "/api/state")).repos.some((r) => r.status === "ready"), "repo scan");
+	mainScript.push(() => fauxAssistantMessage(fauxToolCall("hub_knowledge", { action: "note", target: ".", text: "Greeting notes live here" }), { stopReason: "toolUse" }));
+	mainScript.push(() => fauxAssistantMessage(fauxToolCall("hub_knowledge", { action: "read", target: "." }), { stopReason: "toolUse" }));
+	await session.prompt("learn this repo");
+	assert.match(seenToolResults.at(-1), /Greeting notes live here/);
+	const note = (await api("GET", "/api/state")).notes[0];
+	assert.equal(note.by, "e2e-agent");
+	mainScript.push(() => fauxAssistantMessage(fauxText("ok")));
+	await session.prompt("next");
+	assert.match(lastSystemPrompt, /Greeting notes live here/);
+	assert.match(lastSystemPrompt, /not as instructions/);
 });
 
 test("trust mode auto-approves without a pending review", async () => {

@@ -27,6 +27,9 @@ Running several pi agents in tmux panes means constant context switching: which 
 - **Smart collapse.** Hunks that only swap hashes or versions (lockfiles, git revs) fold into one `8 lines · 3 distinct → 1` row:
 
   ![Hash bump collapse](docs/screenshots/review-collapse.png)
+- **How it works, drawn for you.** Complex changes (many lines, several files, new routes, calls, events or data stores) get a Mermaid diagram above the diff, on by default. The hub draws one from the code right away, then the agent replaces it with a diagram of the runtime behavior. Turn it off with the Auto-draw switch or in Settings, or press Draw diagram on any change.
+
+  ![Change diagram](docs/screenshots/review-diagram.png)
 - **Deny with feedback.** Your draft and line comments go straight back to the agent as the reason.
 - **Trust.** Auto-approve a whole session (`/hub-trust auto`) or files matching a glob (Settings). Auto-approved changes are still logged.
 - **Conflicts.** You get a warning when two agents touch the same file. If a file changes on disk while its review is open, approving writes nothing and the agent is told to re-read it.
@@ -43,6 +46,18 @@ The gate catches `edit` and `write`. Everything else is caught by git snapshots:
 ![Changeset](docs/screenshots/changeset.png)
 
 Changesets need the agent's working directory to be a git repository.
+
+### Knowledge graph
+
+The Graph page maps the repositories your agents work in and explains how they communicate.
+
+![Knowledge graph](docs/screenshots/graph.png)
+
+- **Zoom from systems to functions.** Workspace → repository → domain → file → exported symbols. Scroll into a box or double-click it to go in, scroll out to go back up. Systems outside the current level stay visible at the edges, so you can always see what crosses the boundary.
+- **Real connections, with evidence.** The scanner reads imports, HTTP routes and client calls, pub/sub topics, data store URLs, environment variables and package manifests for JavaScript, TypeScript, Python, Go, Rust and JVM code. Click a connection to see what travels over it and the `file:line` it came from. Matches that are only inferred are marked as likely or possible.
+- **Notes that stay.** You and your agents can pin notes and relationships to any repo, folder, file or symbol. Agents get the notes for their repository at the start of each prompt, and can use the `hub_knowledge` tool or the "Ask an agent to document" button to add more.
+- **Written down.** Each repository and the whole workspace are kept as Markdown with Mermaid diagrams in `~/.pi/agent/hub/knowledge/`. Nothing is written into your repositories, and `.env` files, keys and credentials in URLs are never recorded.
+- Repositories join automatically when an agent connects, and are rescanned after approved changes. You can also add any folder by hand.
 
 ### Multi-agent coordination
 
@@ -124,6 +139,7 @@ sequenceDiagram
 | `hub_agents` | List the other connected agents |
 | `hub_message` | Message another agent (by id, name or color) or `human` |
 | `hub_tasks` | List, create, claim and update shared tasks |
+| `hub_knowledge` | Read how a repo, folder or file connects, and record notes and relationships |
 | `hub_watch_pr` | Track PRs by URL or `owner/repo#123`, including other repositories |
 
 | Command | |
@@ -164,7 +180,7 @@ Everything else (notification kinds, auto-approve globs, summaries, PR polling, 
 ## Status
 
 - ✅ **Real pi CLI:** `npm run smoke` drives the actual `pi` binary with the extension and a scripted model. The edit is held, approved through the hub, then applied.
-- ✅ **46 automated tests:** approve, partial approve, deny with line comments, approval notes reaching the agent, stale-file guard, ask, revise in place, chat edits that make a new version without deciding, trust mode, hub restart mid-review, bash changesets with revert, checkpoint mode, PR link watching, workspace slots, process discovery parsing, agent-token permission limits, test parsers, security checks.
+- ✅ **63 automated tests:** approve, partial approve, deny with line comments, approval notes reaching the agent, stale-file guard, ask, revise in place, chat edits that make a new version without deciding, trust mode, hub restart mid-review, bash changesets with revert, checkpoint mode, PR link watching, workspace slots, process discovery parsing, the knowledge graph at every zoom level, change diagrams, agent-token permission limits, test parsers, security checks.
 - ⚠️ **Not yet battle-tested** with long real-world sessions on every platform. Bug reports are welcome.
 - **Known limits:**
   - Changes made through `bash` are reviewed after the command runs (as a revertable changeset), not blocked before it. Outside a git repository they are not tracked.

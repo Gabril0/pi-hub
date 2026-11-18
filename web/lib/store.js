@@ -1,6 +1,6 @@
 import { useEffect, useState } from "../vendor/preact-htm.js";
 
-const COLLECTIONS = ["sessions", "reviews", "changesets", "inbox", "tasks", "testRuns", "prs", "results", "messages"];
+const COLLECTIONS = ["sessions", "reviews", "changesets", "inbox", "tasks", "testRuns", "prs", "results", "messages", "repos", "notes", "graphLinks"];
 
 const state = {
 	connected: false,

@@ -12,6 +12,7 @@ import { TasksView } from "./views/tasks.js";
 import { PrsView } from "./views/prs.js";
 import { ResultsView } from "./views/results.js";
 import { SettingsView } from "./views/settings.js";
+import { GraphView } from "./views/graph.js";
 
 const NAV = [
 	{ name: "inbox", label: "Inbox", icon: "inbox", key: "1" },
@@ -21,7 +22,8 @@ const NAV = [
 	{ name: "tasks", label: "Tasks", icon: "tasks", key: "5" },
 	{ name: "prs", label: "Pull requests", icon: "pr", key: "6" },
 	{ name: "results", label: "Results", icon: "results", key: "7" },
-	{ name: "settings", label: "Settings", icon: "settings", key: "8" },
+	{ name: "graph", label: "Graph", icon: "graph", key: "8" },
+	{ name: "settings", label: "Settings", icon: "settings", key: "9" },
 ];
 
 
@@ -138,6 +140,9 @@ function Shell() {
 			break;
 		case "results":
 			view = html`<${ResultsView} id=${route.id} />`;
+			break;
+		case "graph":
+			view = html`<${GraphView} focus=${route.id} />`;
 			break;
 		case "settings":
 			view = html`<${SettingsView} />`;

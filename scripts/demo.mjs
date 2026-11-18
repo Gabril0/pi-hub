@@ -1,6 +1,6 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, posix } from "node:path";
+import { dirname, join, posix } from "node:path";
 
 process.env.PI_HUB_DIR ??= mkdtempSync(join(tmpdir(), "pi-hub-demo-"));
 process.env.PI_HUB_PORT ??= "4810";
@@ -170,6 +170,59 @@ async function scriptedAgent(sessionId) {
 	}
 }
 for (const sessionId of ["demo-rust", "demo-web"]) scriptedAgent(sessionId).catch(() => {});
+
+const demoRepos = {
+	"storefront-web": {
+		"package.json": JSON.stringify({ name: "storefront-web", description: "Customer storefront: catalog, cart and invoices.", dependencies: { "@acme/sdk": "1.0.0", react: "19.0.0" } }),
+		"src/app.tsx": 'import { CartPage } from "./pages/cart";\nimport { InvoicePage } from "./pages/invoice";\nexport function App() {\n\treturn [CartPage, InvoicePage];\n}\n',
+		"src/pages/cart.tsx": 'import { createOrder } from "../api/orders";\nimport { Badge } from "../ui/badge";\nexport function CartPage() {\n\treturn [createOrder, Badge];\n}\n',
+		"src/pages/invoice.tsx": 'import { getOrder } from "../api/orders";\nimport { renderInvoice } from "../invoice";\nexport function InvoicePage() {\n\treturn [getOrder, renderInvoice];\n}\n',
+		"src/invoice.ts": 'export function renderInvoice(total: number) {\n\treturn total.toFixed(2);\n}\n',
+		"src/ui/badge.tsx": "export function Badge() {\n\treturn null;\n}\n",
+		"src/api/orders.ts": 'import { retry } from "@acme/sdk";\nexport function getOrder(id: string) {\n\treturn retry(() => fetch(`/api/orders/${id}`));\n}\nexport function createOrder(body: string) {\n\treturn retry(() => fetch("/api/orders", { method: "POST", body }));\n}\n',
+	},
+	"orders-api": {
+		"Cargo.toml": '[package]\nname = "orders-api"\ndescription = "Order lifecycle service: checkout, refunds and order events."\n\n[dependencies]\nacme-sdk = "1"\nsqlx = "0.8"\n',
+		"src/main.rs": 'mod routes;\nmod db;\nmod events;\nfn main() {\n    routes::serve();\n}\n',
+		"src/routes.rs": 'use crate::db::{load_order, save_order};\nuse crate::events::order_created;\npub fn serve() {\n    Router::new().route("/orders", post(create)).route("/orders/:id", get(show));\n}\nfn create() {\n    save_order();\n    order_created();\n}\nfn show() {\n    load_order();\n}\n',
+		"src/db.rs": 'pub fn pool() -> &\'static str {\n    "postgres://orders-db/orders"\n}\npub fn save_order() {}\npub fn load_order() {}\n',
+		"src/events.rs": 'pub fn order_created() {\n    bus.publish("orders.created");\n}\n',
+	},
+	"billing-worker": {
+		"pyproject.toml": '[project]\nname = "billing-worker"\ndescription = "Charges customers when orders are created."\ndependencies = ["redis"]\n',
+		"billing/consumer.py": 'from billing.charge import charge_order\n\ndef run(bus):\n    bus.subscribe("orders.created")\n    charge_order()\n',
+		"billing/charge.py": 'import requests\n\ndef charge_order():\n    requests.post("https://api.stripe.com/v1/charges")\n',
+	},
+	"acme-sdk": {
+		"package.json": JSON.stringify({ name: "@acme/sdk", description: "Shared HTTP client with retries." }),
+		"src/index.ts": 'export { retry } from "./retry";\n',
+		"src/retry.ts": "export function retry(run: () => unknown) {\n\treturn run();\n}\n",
+	},
+};
+const repoDir = join(process.env.PI_HUB_DIR, "demo-repos");
+const repoIds = {};
+for (const [name, files] of Object.entries(demoRepos)) {
+	for (const [path, content] of Object.entries(files)) {
+		const target = join(repoDir, name, path);
+		mkdirSync(dirname(target), { recursive: true });
+		writeFileSync(target, content);
+	}
+	const res = await fetch(`${base}/api/knowledge/repos`, { method: "POST", headers: { "content-type": "application/json", "x-hub-token": hub.humanToken }, body: JSON.stringify({ path: join(repoDir, name) }) });
+	repoIds[name] = (await res.json()).repo.id;
+}
+while (hub.store.all("repos").some((repo) => repo.status !== "ready")) await new Promise((r) => setTimeout(r, 50));
+await call("POST", "/api/knowledge/notes", { sessionId: "demo-api", target: "orders-api", text: "Owns the order lifecycle. **Refunds** leave `null` rows in list responses until they settle." });
+await call("POST", "/api/knowledge/notes", { sessionId: "demo-api", target: "orders-api/src/events.rs", text: "Events are published after the database commit, so consumers can safely re-read the order." });
+await call("POST", "/api/knowledge/notes", { sessionId: "demo-web", target: "storefront-web/src/api", text: "All order traffic goes through here so retries stay in one place." });
+await call("POST", "/api/knowledge/links", { sessionId: "demo-api", from: "billing-worker", to: "orders-api", label: "replays failed charges nightly" });
+
+const checkoutAfter = 'use crate::db::save_order;\nuse crate::events::order_created;\n\npub fn routes(router: Router) -> Router {\n    router.route("/checkout", post(checkout))\n}\n\npub async fn checkout(cart: Cart) -> Result<Order> {\n    let quote = reqwest::get("https://api.stripe.com/v1/quotes").await?;\n    let order = save_order(cart, quote).await?;\n    bus.publish("orders.checkout");\n    order_created(&order).await;\n    Ok(order)\n}\n';
+const checkout = await call("POST", "/api/reviews", { sessionId: "demo-api", tool: "write", path: "src/checkout.rs", absPath: posix.join(work, "orders-api", "src", "checkout.rs"), isNew: true, oldContent: "", newContent: checkoutAfter, intent: "Adding a **checkout** endpoint that quotes the payment, stores the order and tells the rest of the system." });
+await call("POST", `/api/reviews/${checkout.id}/diagram`, {
+	title: "Checkout from cart to billing",
+	summary: "The storefront posts the cart, the API quotes the payment and commits the order, then billing reacts to the event.",
+	mermaid: 'sequenceDiagram\n  actor C as Customer\n  participant W as storefront-web\n  participant A as orders-api (new /checkout)\n  participant S as Stripe\n  participant D as Postgres\n  participant B as billing-worker\n  C->>W: Confirm cart\n  W->>A: POST /checkout\n  A->>S: Fetch quote\n  S-->>A: Quote\n  A->>D: Save order\n  A--)B: orders.checkout event\n  A-->>W: Order\n  B->>S: Charge customer',
+});
 
 writeFileSync(join(process.env.PI_HUB_DIR, "demo-url.txt"), hub.url());
 console.log(`demo hub: ${hub.url()}`);

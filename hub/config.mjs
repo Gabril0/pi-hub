@@ -30,6 +30,7 @@ export const DEFAULT_CONFIG = {
 	review: {
 		autoApprove: [],
 		contextLines: 3,
+		explainDiagrams: true,
 	},
 	summaries: {
 		onAgentEnd: true,

@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { STATE_FILE, ensureHubDir } from "./config.mjs";
 
-export const COLLECTIONS = ["sessions", "reviews", "changesets", "inbox", "tasks", "testRuns", "prs", "results", "messages"];
+export const COLLECTIONS = ["sessions", "reviews", "changesets", "inbox", "tasks", "testRuns", "prs", "results", "messages", "repos", "notes", "graphLinks"];
 
 const LIMITS = {
 	reviews: 300,
@@ -11,6 +11,8 @@ const LIMITS = {
 	testRuns: 200,
 	results: 300,
 	messages: 1000,
+	notes: 3000,
+	graphLinks: 1000,
 };
 const EVENTS_PER_SESSION = 400;
 const REVIEWS_WITH_CONTENT = 80;
