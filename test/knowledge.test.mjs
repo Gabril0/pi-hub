@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { before, test } from "node:test";
@@ -237,6 +237,31 @@ test("the hub scans, shares notes with agents and writes Markdown", async () => 
 		assert.equal(restored.nodes.find((n) => n.label === "orders-api").notes, 1);
 	} finally {
 		await reopened.close();
+	}
+});
+
+test("notes reach an agent whichever path spells the repo", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "pi-hub-linked-"));
+	const real = join(dir, "real-repo");
+	const link = join(dir, "linked-repo");
+	mkdirSync(join(real, "src"), { recursive: true });
+	writeFileSync(join(real, "src", "a.ts"), "export const a = 1;\n");
+	symlinkSync(real, link, "junction");
+	const hub = createHub({ port: 0, stateFile: join(dir, "state.json"), silent: true, discover: () => [] });
+	const port = await hub.listen();
+	const call = async (token, method, path, body) => (await fetch(`http://127.0.0.1:${port}${path}`, { method, headers: { "x-hub-token": token, "content-type": "application/json" }, body: body ? JSON.stringify(body) : undefined })).json();
+	const notesFor = async (path) => (await call(hub.token, "GET", `/api/knowledge/brief?path=${encodeURIComponent(path)}`)).notes.map((note) => note.text);
+	try {
+		await call(hub.humanToken, "POST", "/api/knowledge/repos", { path: link });
+		await call(hub.humanToken, "POST", "/api/knowledge/repos", { path: real });
+		assert.equal(hub.store.all("repos").length, 1);
+		const deadline = Date.now() + 8000;
+		while (hub.store.all("repos")[0].status !== "ready" && Date.now() < deadline) await new Promise((r) => setTimeout(r, 30));
+		await call(hub.token, "POST", "/api/sessions/register", { id: "s1", cwd: link });
+		await call(hub.token, "POST", "/api/knowledge/notes", { sessionId: "s1", target: "src/a.ts", text: "linked note" });
+		for (const path of [real, link, join(link, "src", "new.ts")]) assert.deepEqual(await notesFor(path), ["linked note"]);
+	} finally {
+		await hub.close();
 	}
 });
 

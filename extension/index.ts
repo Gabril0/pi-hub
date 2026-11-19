@@ -8,6 +8,7 @@ import { Type } from "typebox";
 import { buildProposal, changedSinceProposal, diffStats, normalizeToLF, type Proposal, rebaseChange, resolveToolPath, restoreFormat, rewriteInputForContent, stripBom } from "./edits";
 import { type StagedEntry, StagedQueue } from "./lookahead";
 import { type ChannelMessage, HubClient } from "./hub-client";
+import { loadKnowledgeBrief } from "./knowledge-brief";
 import { diffSnapshots, isReadOnlyCommand, type Snapshot, takeSnapshot } from "./snapshot";
 import { converseAboutProposal, explainChange, formatLineComments, type LineComment, reconcileBufferedChange, reviseProposal, summarizeSession } from "./llm";
 import { isTestCommand } from "../hub/test-parsers.mjs";
@@ -365,13 +366,8 @@ export default function piHub(pi: ExtensionAPI) {
 		}
 	}
 
-	async function knowledgeBrief(path: string): Promise<{ text: string; notes: Array<{ where: string; text: string; by?: string }> }> {
-		try {
-			const brief = await Promise.race([client.get(`/api/knowledge/brief?path=${encodeURIComponent(path)}`), new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timeout")), 1500))]);
-			return { text: brief.text ?? "", notes: brief.notes ?? [] };
-		} catch {
-			return { text: "", notes: [] };
-		}
+	function knowledgeBrief(path: string) {
+		return loadKnowledgeBrief((url, signal) => client.request("GET", url, undefined, signal), path, (text) => client.event({ kind: "error", text }));
 	}
 
 	async function handleReviewExplain(reviewId: string, reasons: string[]) {

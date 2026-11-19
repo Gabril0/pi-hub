@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, join, relative } from "node:path";
+import { canonicalPath } from "./paths.mjs";
 import { newId } from "./store.mjs";
 import { canonicalRepoRoot, scanRepo } from "./knowledge-scan.mjs";
 import { ROOT_ID, buildModel, describeNode, repoMarkdown, repoNodeId, resolveTarget, searchNodes, viewGraph, workspaceMarkdown } from "./knowledge-graph.mjs";
@@ -24,6 +25,7 @@ export function createKnowledge({ store, dir, pathKey, log = () => {} }) {
 	let closed = false;
 
 	const scanFile = (key) => join(dir, `${key}.scan.json`);
+	const rootKey = (path) => pathKey(canonicalPath(path));
 
 	function save(file, text) {
 		mkdirSync(dir, { recursive: true });
@@ -108,14 +110,14 @@ export function createKnowledge({ store, dir, pathKey, log = () => {} }) {
 
 	async function addRepo(path, source = "manual") {
 		if (closed) return undefined;
-		const root = await canonicalRepoRoot(path);
+		const root = canonicalPath(await canonicalRepoRoot(path));
 		if (closed) return undefined;
 		const key = repoKeyOf(root, pathKey);
-		const existing = store.get("repos", key);
+		const existing = store.get("repos", key) ?? store.all("repos").find((repo) => rootKey(repo.root) === rootKey(root));
 		if (existing) {
-			if (source === "manual" && existing.source !== "manual") store.patch("repos", key, { source });
-			if (Date.now() - (existing.scannedAt ?? 0) > RESCAN_AFTER_MS || !scans.has(key)) schedule(key, 50);
-			return store.get("repos", key);
+			if (source === "manual" && existing.source !== "manual") store.patch("repos", existing.id, { source });
+			if (Date.now() - (existing.scannedAt ?? 0) > RESCAN_AFTER_MS || !scans.has(existing.id)) schedule(existing.id, 50);
+			return store.get("repos", existing.id);
 		}
 		const repo = store.upsert("repos", { id: key, root, name: basename(root.replace(/[\\/]+$/, "")), source, status: "pending", createdAt: Date.now() });
 		schedule(key, 50);
@@ -132,10 +134,10 @@ export function createKnowledge({ store, dir, pathKey, log = () => {} }) {
 	}
 
 	function repoForPath(path) {
-		const key = pathKey(path);
+		const key = rootKey(path);
 		return store
 			.all("repos")
-			.map((repo) => ({ repo, root: pathKey(repo.root) }))
+			.map((repo) => ({ repo, root: rootKey(repo.root) }))
 			.filter(({ root }) => key === root || key.startsWith(`${root}/`))
 			.sort((a, b) => b.root.length - a.root.length)[0]?.repo;
 	}
@@ -145,8 +147,8 @@ export function createKnowledge({ store, dir, pathKey, log = () => {} }) {
 		if (repo) schedule(repo.id, delay);
 	}
 
-	function relativeInRepo(repo, path) {
-		return relative(repo.root, path).split("\\").join("/");
+	function relativeInRepo(root, path) {
+		return relative(root, path).split("\\").join("/");
 	}
 
 	function activity() {
@@ -156,8 +158,10 @@ export function createKnowledge({ store, dir, pathKey, log = () => {} }) {
 			const repo = repoForPath(session.repoRoot || session.cwd || "") ?? store.all("repos").find((r) => r.name === session.repo);
 			if (!repo) continue;
 			entries.push({ sessionId: session.id, repo: repo.id });
+			const root = canonicalPath(repo.root);
 			for (const file of (session.filesTouched ?? []).slice(-20)) {
-				if (pathKey(file).startsWith(`${pathKey(repo.root)}/`)) entries.push({ sessionId: session.id, repo: repo.id, path: relativeInRepo(repo, file) });
+				const real = canonicalPath(file);
+				if (pathKey(real).startsWith(`${pathKey(root)}/`)) entries.push({ sessionId: session.id, repo: repo.id, path: relativeInRepo(root, real) });
 			}
 		}
 		return entries;

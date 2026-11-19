@@ -181,7 +181,7 @@ Everything else (notification kinds, auto-approve globs, summaries, PR polling, 
 ## Status
 
 - ✅ **Real pi CLI:** `npm run smoke` drives the actual `pi` binary with the extension and a scripted model. The edit is held, approved through the hub, then applied.
-- ✅ **83 automated tests:** approve, partial approve, deny with line comments, approval notes reaching the agent, stale-file guard, ask, revise in place, chat edits that make a new version without deciding, the one-diff-ahead buffer, trust mode, hub restart mid-review, bash changesets with revert, checkpoint mode, PR link watching, workspace slots, process discovery parsing, the knowledge graph at every zoom level, change diagrams, agent-token permission limits, test parsers, security checks.
+- ✅ **89 automated tests:** approve, partial approve, deny with line comments, approval notes reaching the agent, stale-file guard, ask, revise in place, chat edits that make a new version without deciding, the one-diff-ahead buffer, trust mode, hub restart mid-review, bash changesets with revert, checkpoint mode, PR link watching, workspace slots, process discovery parsing, the knowledge graph at every zoom level, change diagrams, agent-token permission limits, test parsers, security checks.
 - ⚠️ **Not yet battle-tested** with long real-world sessions on every platform. Bug reports are welcome.
 - **Known limits:**
   - Changes made through `bash` are reviewed after the command runs (as a revertable changeset), not blocked before it. Outside a git repository they are not tracked.
