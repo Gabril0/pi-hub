@@ -1,4 +1,5 @@
 import { html, useEffect, useMemo, useRef, useState } from "../vendor/preact-htm.js";
+import { TweenText } from "../lib/motion.js";
 import { api, sessionOf, sorted, useStore } from "../lib/store.js";
 import { Empty, Modal, SessionChip, colorOf, sessionName, timeAgo, useTick } from "../lib/util.js";
 import { SpawnDialog } from "./agents.js";
@@ -35,6 +36,7 @@ function TaskCard({ task, tasks, onOpen, onDragState }) {
 	const openDeps = deps.filter((d) => tasks.get(d)?.status !== "done").length;
 	return html`<div
 		class="card task-card"
+		data-m=${`task-${task.id}`}
 		style=${`--c:${owner ? colorOf(owner) : "var(--line-strong)"}`}
 		draggable="true"
 		onDragStart=${(e) => {
@@ -102,7 +104,7 @@ function Board({ tasks, onOpen }) {
 					<span class="dot" style=${`--c:${STATUS_COLOR[column.status]}`}></span>
 					<span>${column.label}</span>
 					<span class="spacer"></span>
-					<span class="pill">${items.length}</span>
+					<span class="pill"><${TweenText} value=${items.length} /></span>
 				</div>
 				<div class="col" style="gap:10px">
 					${items.map((task) => html`<${TaskCard} key=${task.id} task=${task} tasks=${tasks} onOpen=${onOpen} onDragState=${setDragging} />`)}

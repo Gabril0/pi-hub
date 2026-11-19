@@ -1,7 +1,8 @@
-import { html, render, useEffect, useState } from "./vendor/preact-htm.js";
+import { html, render, useEffect, useRef, useState } from "./vendor/preact-htm.js";
 import { connect, onInboxItem, onToast, openChangesets, openInbox, pendingReviews, sessionOf, sorted, useStore } from "./lib/store.js";
 import { LineStats, Modal, SessionChip, colorOf, isTyping, navigate, sessionName, useRoute, useTick } from "./lib/util.js";
 import { chime } from "./lib/sound.js";
+import { TweenText, installMotion, useActivity } from "./lib/motion.js";
 import { Icon } from "./lib/icons.js";
 import { InboxView } from "./views/inbox.js";
 import { AgentsView, AgentDetail, SpawnDialog, BroadcastDialog } from "./views/agents.js";
@@ -40,7 +41,7 @@ function Toasts() {
 	const [toasts, setToasts] = useState([]);
 	const state = useStore();
 	const push = (item, ttl) => {
-		const toast = { ...item, toastId: Math.random() };
+		const toast = { ...item, toastId: Math.random(), ttl };
 		setToasts((list) => [...list.slice(-3), toast]);
 		setTimeout(() => setToasts((list) => list.filter((t) => t.toastId !== toast.toastId)), ttl);
 	};
@@ -66,7 +67,7 @@ function Toasts() {
 	const card = (t) => {
 		const session = sessionOf(t.sessionId);
 		const dismiss = () => setToasts((list) => list.filter((x) => x.toastId !== t.toastId));
-		return html`<div class=${`card glossy toast ${t.tone ? `tone-${t.tone}` : ""}`} style=${`--c:${colorOf(session)}`} onClick=${() => (t.local ? dismiss() : navigate(t.path ?? "#/inbox"))}>
+		return html`<div key=${t.toastId} class=${`card glossy toast ${t.local ? "local" : ""} ${t.tone ? `tone-${t.tone}` : ""}`} style=${`--c:${colorOf(session)};--ttl:${t.ttl}ms`} onClick=${() => (t.local ? dismiss() : navigate(t.path ?? "#/inbox"))}>
 			<div class="accent-bar"></div>
 			<div class="row small faint"><${Icon} name=${t.kind} size=${13} /> ${session ? sessionName(session) : "hub"}</div>
 			<div class="toast-title">${t.title}</div>
@@ -91,6 +92,8 @@ function Shell() {
 	const openTasks = [...state.tasks.values()].filter((t) => t.status !== "done").length;
 	const badges = { inbox: inbox.length, reviews: reviews.length + changes.length, agents: online.length, tests: failing, tasks: openTasks };
 	const urgent = { inbox: true, reviews: true, tests: true };
+	const orb = useRef();
+	useActivity(orb, Math.min(online.filter((s) => s.status === "working").length / 2, 1));
 
 	useEffect(() => {
 		const count = inbox.length;
@@ -164,17 +167,17 @@ function Shell() {
 	return html`<div class="shell">
 		<header class="topbar">
 			<div class="brand">
-				<div class="orb">π</div>
+				<div class="orb" ref=${orb}>π</div>
 				<div class="brand-text">
 					<div class="brand-name">pi hub</div>
-					<div class="brand-sub">${online.length} agent${online.length === 1 ? "" : "s"} online</div>
+					<div class="brand-sub"><${TweenText} value=${online.length} /> agent${online.length === 1 ? "" : "s"} online</div>
 				</div>
 			</div>
 			<${Clock} />
 			<div class="session-strip">
 				${sessions
 					.filter((s) => s.online || Date.now() - (s.lastSeen ?? 0) < 6 * 3600_000)
-					.map((s) => html`<${SessionChip} session=${s} showStatus=${true} on=${route.name === "agents" && route.id === s.id} onClick=${() => navigate(`#/agents/${encodeURIComponent(s.id)}`)} />`)}
+					.map((s) => html`<${SessionChip} key=${s.id} session=${s} showStatus=${true} on=${route.name === "agents" && route.id === s.id} onClick=${() => navigate(`#/agents/${encodeURIComponent(s.id)}`)} />`)}
 			</div>
 			<button class="btn sm" onClick=${() => setDialog("broadcast")} title="Message every online agent"><${Icon} name="broadcast" size=${14} />Broadcast</button>
 			<button class="btn sm primary" onClick=${() => setDialog("spawn")}><${Icon} name="plus" size=${14} />New agent</button>
@@ -185,7 +188,7 @@ function Shell() {
 			${NAV.map(
 				(item) => html`<a class=${`nav-item ${route.name === item.name || (item.name === "reviews" && (route.name === "review" || route.name === "changeset")) ? "active" : ""}`} href=${`#/${item.name}`}>
 					<span class="nav-icon"><${Icon} name=${item.icon} /></span>${item.label}
-					${badges[item.name] ? html`<span class=${`nav-badge ${urgent[item.name] ? "" : "calm"}`}>${badges[item.name]}</span>` : null}
+					${badges[item.name] ? html`<span class=${`nav-badge ${urgent[item.name] ? "" : "calm"}`}><${TweenText} value=${badges[item.name]} /></span>` : null}
 				</a>`,
 			)}
 			<div class="rail-section">Pending reviews</div>
@@ -193,7 +196,7 @@ function Shell() {
 				const href = type === "review" ? `#/review/${item.id}` : `#/changeset/${item.id}`;
 				const active = route.hash === href;
 				const label = type === "review" ? item.path.split("/").pop() : item.title || `${item.files?.length ?? 0} files`;
-				return html`<a class=${`list-row rail-pending ${active ? "active" : ""}`} style=${`--c:${colorOf(item.sessionId)}`} href=${href} title=${type === "review" ? item.path : item.title}>
+				return html`<a key=${item.id} class=${`list-row rail-pending ${active ? "active" : ""}`} style=${`--c:${colorOf(item.sessionId)}`} href=${href} title=${type === "review" ? item.path : item.title}>
 					<span class="dot" style=${`--c:${colorOf(item.sessionId)}`}></span>
 					${type === "changeset" ? html`<span class="rail-kind">${item.kind === "turn" ? "turn" : "$"}</span>` : null}
 					<span class=${`ellipsis small ${type === "changeset" && item.kind === "bash" ? "mono" : ""}`} style="flex:1">${label}</span>
@@ -210,5 +213,6 @@ function Shell() {
 	</div>`;
 }
 
+installMotion(document.getElementById("app"));
 connect();
 render(html`<${Shell} />`, document.getElementById("app"));

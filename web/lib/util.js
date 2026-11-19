@@ -1,5 +1,6 @@
 import { html, useEffect, useState } from "../vendor/preact-htm.js";
 import { allSessions, sessionOf } from "./store.js";
+import { TweenText } from "./motion.js";
 
 export function timeAgo(ts) {
 	if (!ts) return "";
@@ -163,7 +164,7 @@ export function sanitize(markup) {
 
 export function LineStats({ stats, class: cls = "" }) {
 	if (!stats || (!stats.added && !stats.removed)) return null;
-	return html`<span class=${`line-stats ${cls}`}><span class="plus">+${stats.added ?? 0}</span><span class="minus">−${stats.removed ?? 0}</span></span>`;
+	return html`<span class=${`line-stats ${cls}`}><span class="plus">+<${TweenText} value=${stats.added ?? 0} /></span><span class="minus">−<${TweenText} value=${stats.removed ?? 0} /></span></span>`;
 }
 
 export function MonoBadge({ session, large = false }) {
@@ -188,10 +189,10 @@ export function SessionChip({ session, id, on, onClick, showStatus = false, stat
 
 const ZERO_VALUES = new Set(["0", "0%", "–", "-", "$0.00", "$0.0000", "0ms", "?"]);
 
-export function Stat({ value, label, tone }) {
+export function Stat({ value, label, tone, count = true }) {
 	const text = String(value ?? "–");
 	const zero = ZERO_VALUES.has(text);
-	return html`<div class=${`stat ${zero ? "zero" : tone ? `tone-${tone}` : ""}`}><div class="stat-v">${text}</div><div class="stat-k">${label}</div></div>`;
+	return html`<div class=${`stat ${zero ? "zero" : tone ? `tone-${tone}` : ""}`}><div class="stat-v"><${TweenText} value=${text} count=${count} /></div><div class="stat-k">${label}</div></div>`;
 }
 
 export function Status({ value }) {
@@ -204,6 +205,10 @@ export function Empty({ icon = "✦", title, children }) {
 		<div style="font-family:var(--font-display);font-size:17px;color:var(--ink)">${title}</div>
 		<div class="small" style="margin-top:6px">${children}</div>
 	</div>`;
+}
+
+export function Chevron({ open }) {
+	return html`<span class=${`chev ${open ? "open" : ""}`} aria-hidden="true">▸</span>`;
 }
 
 export function Switch({ on, onChange, label }) {

@@ -1,4 +1,5 @@
 import { html, useEffect, useState } from "../vendor/preact-htm.js";
+import { Meter } from "../lib/motion.js";
 import { api, loadEvents, sessionOf, sorted, toast, useStore } from "../lib/store.js";
 import { Empty, Stat, Markdown, MonoBadge, SessionChip, Status, Switch, baseName, clock, colorOf, compact, duration, money, navigate, sessionName, timeAgo, useTick, workspaceOf } from "../lib/util.js";
 import { SessionChanges } from "./review.js";
@@ -52,7 +53,7 @@ export function Progress({ session, limit = 6 }) {
 	const marks = { done: "✓", active: "▸", blocked: "✗", pending: "○" };
 	return html`<div class="col" style="gap:8px">
 		<div class="row small"><span class="muted">Plan</span><span class="spacer"></span><span class="faint">${done}/${steps.length}</span></div>
-		<div class="meter" style=${`--c:${colorOf(session)}`}><span style=${`width:${(done / steps.length) * 100}%`}></span></div>
+		<${Meter} value=${(done / steps.length) * 100} color=${colorOf(session)} />
 		<div class="steps">
 			${steps.slice(0, limit).map((s) => html`<div class=${`step ${s.status}`}><span class="mark">${marks[s.status] ?? "○"}</span><span>${s.title}</span></div>`)}
 			${steps.length > limit ? html`<div class="tiny faint">+${steps.length - limit} more</div>` : null}

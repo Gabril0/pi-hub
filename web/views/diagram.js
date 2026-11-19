@@ -1,6 +1,7 @@
 import { html, useEffect, useRef, useState } from "../vendor/preact-htm.js";
 import { api, toast, useStore } from "../lib/store.js";
-import { Modal, Switch } from "../lib/util.js";
+import { Chevron, Modal, Switch } from "../lib/util.js";
+import { beforeChange, revealDiagram } from "../lib/motion.js";
 
 let loading;
 let queue = Promise.resolve();
@@ -70,7 +71,10 @@ export function MermaidView({ source, fallback, class: cls = "" }) {
 		let alive = true;
 		setFailure(null);
 		const show = (svg) => {
-			if (alive && ref.current) ref.current.innerHTML = svg;
+			if (!alive || !ref.current) return;
+			beforeChange();
+			ref.current.innerHTML = svg;
+			revealDiagram(ref.current);
 		};
 		renderMermaid(source)
 			.then(show)
@@ -135,9 +139,9 @@ export function ExplainPanel({ kind, item, revision }) {
 	const drawing = explain?.status === "drawing";
 	return html`<section class="explain-panel" aria-label="How this change works">
 		<div class="explain-head">
-			<button class="explain-toggle" aria-expanded=${open} onClick=${toggleOpen}><span>${open ? "▾" : "▸"}</span><span class="why-label">How it works</span></button>
+			<button class="explain-toggle" aria-expanded=${open} onClick=${toggleOpen}><${Chevron} open=${open} /><span class="why-label">How it works</span></button>
 			${explain?.title ? html`<span class="small ellipsis explain-title" title=${explain.title}>${explain.title}</span>` : null}
-			${drawing ? html`<span class="pill accent">${explain.mermaid ? "agent is refining…" : "agent is drawing…"}</span>` : null}
+			${drawing ? html`<span class="pill accent shimmer">${explain.mermaid ? "agent is refining…" : "agent is drawing…"}</span>` : null}
 			${explain?.status === "ready" ? html`<span class="pill" title=${explain.source === "agent" ? "Drawn by the agent with its model" : "Built directly from the code, without a model"}>${explain.source === "agent" ? "by the agent" : "from the code"}</span>` : null}
 			${stale ? html`<span class="pill warn">drawn for v${explain.revision}</span>` : null}
 			<span class="spacer"></span>

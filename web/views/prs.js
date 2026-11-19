@@ -1,6 +1,6 @@
 import { html, useState } from "../vendor/preact-htm.js";
 import { api, useStore } from "../lib/store.js";
-import { Empty, SessionChip, colorOf, navigate, timeAgo, useTick } from "../lib/util.js";
+import { Chevron, Empty, SessionChip, colorOf, navigate, timeAgo, useTick } from "../lib/util.js";
 
 const STATE_TONE = { OPEN: "ok", MERGED: "accent", CLOSED: "bad" };
 const CHECK_TONE = { passed: "ok", failed: "bad", pending: "warn", none: "" };
@@ -38,7 +38,7 @@ function PrCard({ pr }) {
 			${pr.reviewDecision && pr.reviewDecision !== "NONE" ? html`<span class=${`pill ${REVIEW_TONE[pr.reviewDecision] ?? ""}`}>review: ${label(pr.reviewDecision)}</span>` : html`<span class="pill">no review</span>`}
 			${pr.mergeable ? html`<span class=${`pill ${MERGEABLE_TONE[pr.mergeable] ?? ""}`}>${label(pr.mergeable)}</span>` : null}
 			<button class=${`pill pill-btn ${CHECK_TONE[pr.checksState] ?? ""}`} disabled=${!checks.length} onClick=${() => setOpen(!open)}>
-				${CHECK_ICON[pr.checksState] ?? "·"} checks ${checks.length ? `${passedCount}/${checks.length}` : "none"} ${checks.length ? (open ? "▾" : "▸") : ""}
+				${CHECK_ICON[pr.checksState] ?? "·"} checks ${checks.length ? `${passedCount}/${checks.length}` : "none"} ${checks.length ? html`<${Chevron} open=${open} />` : ""}
 			</button>
 		</div>
 		${open && checks.length

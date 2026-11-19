@@ -2,7 +2,8 @@ import { html, useEffect, useMemo, useRef, useState } from "../vendor/preact-htm
 import { alignBlock, buildHunks, contentWithBlocks, diffOps, escape, highlightLines, languageFor, pairRows, smartCollapse, stats, wordDiff } from "../lib/diff.js";
 import { api, getState, openChangesets, pendingReviews, sessionOf, sorted, toast, useStore } from "../lib/store.js";
 import { Icon } from "../lib/icons.js";
-import { Empty, LineStats, Markdown, Modal, SessionChip, Status, colorOf, isTyping, navigate, sessionName, timeAgo } from "../lib/util.js";
+import { Chevron, Empty, LineStats, Markdown, Modal, SessionChip, Status, colorOf, isTyping, navigate, sessionName, timeAgo } from "../lib/util.js";
+import { TweenText, glideIntoView, glideScroll, growField } from "../lib/motion.js";
 import { ExplainPanel } from "./diagram.js";
 
 export function DiffStat({ added, removed }) {
@@ -11,8 +12,8 @@ export function DiffStat({ added, removed }) {
 	const a = Math.round((added / total) * boxes);
 	const d = Math.min(boxes - a, Math.round((removed / total) * boxes));
 	return html`<span class="diffstat">
-		<span class="plus">+${added}</span><span class="minus">−${removed}</span>
-		<span class="boxes">${Array.from({ length: boxes }, (_, i) => html`<i class=${i < a ? "a" : i < a + d ? "d" : ""}></i>`)}</span>
+		<span class="plus">+<${TweenText} value=${added} /></span><span class="minus">−<${TweenText} value=${removed} /></span>
+		<span class="boxes" key=${`${a}-${d}`}>${Array.from({ length: boxes }, (_, i) => html`<i class=${i < a ? "a" : i < a + d ? "d" : ""}></i>`)}</span>
 	</span>`;
 }
 
@@ -145,7 +146,7 @@ function CollapseSummary({ summary, open, onToggle }) {
 		${keys.length
 			? html`<span class="tiny muted collapse-keys" title=${keys.join(", ")}>${keys.slice(0, 3).join(", ")}${keys.length > 3 ? ` +${keys.length - 3}` : ""}</span>`
 			: null}
-		<button class="btn sm" onClick=${onToggle}>${open ? "▾ hide lines" : "▸ show lines"}</button>
+		<button class="btn sm" onClick=${onToggle}><${Chevron} open=${open} />${open ? "hide lines" : "show lines"}</button>
 	</span>`;
 }
 
@@ -214,7 +215,8 @@ export function DiffViewer({
 	useEffect(() => onModel?.(model), [model]);
 	useEffect(() => {
 		if (focusBlock == null) return;
-		document.querySelector(`[data-block="${focusBlock}"]`)?.scrollIntoView({ block: "center", behavior: "smooth" });
+		const row = document.querySelector(`[data-block="${focusBlock}"]`);
+		if (row) glideIntoView(row);
 	}, [focusBlock]);
 
 	const expandGap = (gap, how) => {
@@ -482,6 +484,7 @@ export function ReviewView({ id }) {
 	const inputRef = useRef();
 	const lastRevCount = useRef(memory?.revisions ?? 0);
 	const decided = useRef(false);
+	const chatReady = useRef(false);
 
 	const setPrefs = (patch) => {
 		const next = { ...prefs, ...patch };
@@ -508,7 +511,9 @@ export function ReviewView({ id }) {
 	}, [id, draft, comments, rejected, revisions.length]);
 
 	useEffect(() => {
-		if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight;
+		if (!chatRef.current) return;
+		glideScroll(chatRef.current, chatRef.current.scrollHeight, { instant: !chatReady.current });
+		chatReady.current = true;
 	}, [review?.chat?.length, summary?.status]);
 
 	const session = sessionOf(summary?.sessionId ?? review?.sessionId);
@@ -620,7 +625,7 @@ export function ReviewView({ id }) {
 			${review.applied === true ? html`<span class="pill ok">applied</span>` : review.applied === false ? html`<span class="pill bad">apply failed</span>` : null}
 			${review.partial ? html`<span class="pill accent">partially approved</span>` : null}
 			<span class="tiny faint">${timeAgo(review.createdAt)}</span>
-			${actionable && bufferedNext ? html`<span class="pill ok next-ready" title=${bufferedNext.path}>next diff ready</span>` : actionable && session?.status === "working" ? html`<span class="pill accent">preparing next step…</span>` : null}
+			${actionable && bufferedNext ? html`<span class="pill ok next-ready" title=${bufferedNext.path}>next diff ready</span>` : actionable && session?.status === "working" ? html`<span class="pill accent shimmer">preparing next step…</span>` : null}
 			<span class="spacer"></span>
 			${queue.length > 1 || (queue.length === 1 && queueIndex === -1)
 				? html`<div class="row small muted pager">
@@ -634,11 +639,11 @@ export function ReviewView({ id }) {
 				<button class=${prefs.mode === "split" ? "on" : ""} onClick=${() => setPrefs({ mode: "split" })}>split</button>
 				<button class=${prefs.mode === "unified" ? "on" : ""} onClick=${() => setPrefs({ mode: "unified" })}>unified</button>
 			</div>
-			<div class="segmented flat">
+			<div class="segmented flat" data-free>
 				<button class=${prefs.wrap ? "on" : ""} onClick=${() => setPrefs({ wrap: !prefs.wrap })}>wrap</button>
 				<button class=${prefs.ignoreWhitespace ? "on" : ""} onClick=${() => setPrefs({ ignoreWhitespace: !prefs.ignoreWhitespace })}>ignore ws</button>
 			</div>
-			<div class="segmented" title="Context lines">
+			<div class="segmented" data-free title="Context lines">
 				<button onClick=${() => setPrefs({ context: Math.max(0, prefs.context - 2) })}>−</button>
 				<button class="on">${prefs.context}</button>
 				<button onClick=${() => setPrefs({ context: prefs.context + 2 })}>+</button>
@@ -750,8 +755,7 @@ export function ReviewView({ id }) {
 							value=${draft}
 							onInput=${(e) => {
 								setDraft(e.target.value);
-								e.target.style.height = "auto";
-								e.target.style.height = `${Math.min(e.target.scrollHeight, 140)}px`;
+								growField(e.target);
 							}}
 							onKeyDown=${(e) => {
 								if (e.key === "Escape") e.target.blur();
@@ -937,7 +941,7 @@ export function SessionChanges({ sessionId }) {
 							isOpen ? next.delete(f.absPath) : next.add(f.absPath);
 							setOpen(next);
 						}}>
-							<span>${isOpen ? "▾" : "▸"}</span>
+							<${Chevron} open=${isOpen} />
 							<span class="mono ellipsis" style="flex:1">${f.path}</span>
 							${f.baseline && !f.exists ? html`<span class="pill bad">deleted</span>` : null}
 							<${DiffStat} ...${s} />

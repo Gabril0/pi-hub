@@ -189,7 +189,7 @@ export function ChangesetView({ id }) {
 				<button class=${prefs.mode === "split" ? "on" : ""} onClick=${() => setPrefs({ mode: "split" })}>split</button>
 				<button class=${prefs.mode === "unified" ? "on" : ""} onClick=${() => setPrefs({ mode: "unified" })}>unified</button>
 			</div>
-			<div class="segmented flat">
+			<div class="segmented flat" data-free>
 				<button class=${prefs.wrap ? "on" : ""} onClick=${() => setPrefs({ wrap: !prefs.wrap })}>wrap</button>
 			</div>
 		</div>

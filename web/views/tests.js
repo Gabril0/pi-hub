@@ -1,6 +1,6 @@
 import { html, useEffect, useMemo, useState } from "../vendor/preact-htm.js";
 import { api, sessionOf, sorted, useStore } from "../lib/store.js";
-import { Stat, Empty, Modal, SessionChip, Status, colorOf, duration, navigate, sessionName, timeAgo, useTick } from "../lib/util.js";
+import { Chevron, Stat, Empty, Modal, SessionChip, Status, colorOf, duration, navigate, sessionName, timeAgo, useTick } from "../lib/util.js";
 
 const SEPARATORS = ["::", " › ", "/"];
 
@@ -125,7 +125,7 @@ function TestGroup({ group }) {
 		});
 	return html`<div class="test-group">
 		<div class="test-group-head" onClick=${() => setOpen(!open)}>
-			<span class="faint">${open ? "▾" : "▸"}</span>
+			<span class="faint"><${Chevron} open=${open} /></span>
 			<span class="mono ellipsis" style="flex:1">${group.name}</span>
 			${group.failed ? html`<span class="pill bad">${group.failed} ✗</span>` : null}
 			${group.passed ? html`<span class="pill ok">${group.passed} ✓</span>` : null}
@@ -231,7 +231,7 @@ function RunDetail({ run, history }) {
 
 		<div class="card">
 			<div class="row" style="cursor:pointer" onClick=${() => setShowRaw(!showRaw)}>
-				<span class="faint">${showRaw ? "▾" : "▸"}</span>
+				<span class="faint"><${Chevron} open=${showRaw} /></span>
 				<h3 style="font-size:15px">Raw output</h3>
 				<span class="tiny faint">tail</span>
 			</div>

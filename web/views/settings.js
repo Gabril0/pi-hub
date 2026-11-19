@@ -271,7 +271,7 @@ export function SettingsView() {
 			<${Section} title="Hub">
 				<div class="stats">
 					<div class="stat"><div class="stat-v">v${hub.version ?? "?"}</div><div class="stat-k">version</div></div>
-					<${Stat} value=${hub.pid ?? "?"} label="pid" />
+					<${Stat} value=${hub.pid ?? "?"} label="pid" count=${false} />
 					<${Stat} value=${hub.platform ?? "?"} label="platform" />
 					<${Stat} value=${state.connected ? "live" : "offline"} label="stream" />
 				</div>

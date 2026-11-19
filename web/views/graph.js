@@ -1,8 +1,10 @@
-import { html, useEffect, useMemo, useRef, useState } from "../vendor/preact-htm.js";
+import { html, useEffect, useLayoutEffect, useMemo, useRef, useState } from "../vendor/preact-htm.js";
 import { NODE_HEIGHT, NODE_WIDTH, layoutGraph } from "../lib/graph-layout.js";
 import { api, sessionOf, toast, useStore } from "../lib/store.js";
 import { Empty, Markdown, Modal, colorOf, isTyping, navigate, sessionName, timeAgo } from "../lib/util.js";
 import { MermaidView } from "./diagram.js";
+import { RATE, afterFrame, appear, commit, drawLine, halt, isMoving, move, still, tween } from "../lib/motion.js";
+import { clamp, lerp, zoomAround } from "../lib/lerp.js";
 
 const ROOT = "root";
 const EDGE_KINDS = [
@@ -61,45 +63,150 @@ function GraphNode({ node, selected, dimmed, onSelect, onOpen }) {
 
 function GraphEdge({ edge, selected, dimmed, showLabel, onSelect }) {
 	const text = edge.details?.[0] ?? (edge.count > 1 ? `${edge.count} ${edge.kind}s` : "");
-	return html`<g class=${`gedge kind-${edge.kind} conf-${edge.confidence} ${selected ? "selected" : ""} ${dimmed ? "dimmed" : ""}`} onClick=${(e) => (e.stopPropagation(), onSelect(edge.id))}>
+	return html`<g data-edge=${edge.id} class=${`gedge kind-${edge.kind} conf-${edge.confidence} ${selected ? "selected" : ""} ${dimmed ? "dimmed" : ""}`} onClick=${(e) => (e.stopPropagation(), onSelect(edge.id))}>
 		<title>${edge.sentence}</title>
 		<path class="gedge-hit" d=${edge.path} />
 		<path class="gedge-line" d=${edge.path} marker-end=${`url(#arrow-${edge.kind})`} style=${`stroke-width:${Math.min(1.3 + Math.log2(edge.count), 4)}`} />
+		<path class="gedge-flow" d=${edge.path} />
 		${showLabel && text ? html`<text class="gedge-label" x=${edge.labelX} y=${edge.labelY - 5} text-anchor="middle">${clip(text, 22)}${edge.count > 1 && edge.details?.length ? ` +${edge.count - 1}` : ""}</text>` : null}
 	</g>`;
 }
 
-function Canvas({ view, filters, selection, onSelect, onOpen, onUp }) {
+function Canvas({ view, filters, selection, onSelect, onOpen, onUp, control }) {
 	const box = useRef();
-	const [camera, setCamera] = useState({ k: 1, x: 0, y: 0 });
-	const cameraRef = useRef(camera);
-	cameraRef.current = camera;
+	const world = useRef();
+	const camera = useRef({ k: 1, x: 0, y: 0 });
+	const goal = useRef({ k: 1, x: 0, y: 0 });
 	const fitScale = useRef(1);
 	const cooldown = useRef(0);
+	const placedNodes = useRef(new Map());
+	const placedEdges = useRef(new Map());
+	const level = useRef(null);
+	const restore = useRef(0);
 	const edges = useMemo(() => view.edges.filter((edge) => filters.has(edge.kind)), [view, filters]);
 	const nodes = useMemo(() => {
 		const used = new Set(edges.flatMap((edge) => [edge.from, edge.to]));
 		return view.nodes.filter((node) => (!node.ghost && !node.self) || used.has(node.id));
 	}, [view, edges]);
 	const layout = useMemo(() => layoutGraph(nodes, edges), [nodes, edges]);
-	const fit = () => {
+	const paint = useRef(() => {
+		const { k, x, y } = camera.current;
+		world.current?.setAttribute("transform", `translate(${x} ${y}) scale(${k})`);
+		if (!box.current) return;
+		const size = 22 * clamp(k, 0.5, 2);
+		box.current.style.backgroundSize = `${size}px ${size}px`;
+		box.current.style.backgroundPosition = `${x}px ${y}px`;
+	}).current;
+	const aim = (next, rate) => {
+		goal.current = next;
+		for (const key of ["k", "x", "y"]) {
+			tween(camera.current, key, next[key], {
+				from: isMoving(camera.current, key) ? undefined : camera.current[key],
+				rate,
+				eps: key === "k" ? 0.0005 : 0.05,
+				write: (value) => {
+					camera.current[key] = value;
+					afterFrame(paint);
+				},
+			});
+		}
+	};
+	const place = (next) => {
+		for (const key of ["k", "x", "y"]) halt(camera.current, key);
+		Object.assign(camera.current, next);
+		goal.current = next;
+		paint();
+	};
+	const measure = () => {
 		const el = box.current;
-		if (!el) return;
 		const next = fitCamera(layout, { width: el.clientWidth, height: el.clientHeight });
 		fitScale.current = next.k;
-		setCamera(next);
+		return next;
 	};
-	useEffect(fit, [layout]);
+	const fit = () => box.current && aim(measure(), RATE.soft);
+	useLayoutEffect(() => {
+		const el = box.current;
+		const next = measure();
+		const depth = view.crumbs?.length ?? 0;
+		const previous = level.current;
+		const moved = Boolean(previous && previous.id !== view.focus.id);
+		const direction = !previous || (moved && depth >= previous.depth) ? 1 : moved ? -1 : 0;
+		level.current = { id: view.focus.id, depth };
+		clearTimeout(restore.current);
+		world.current.style.visibility = "";
+		if (!previous) place(zoomAround(next, 0.94, el.clientWidth / 2, el.clientHeight / 2));
+		else if (moved) place(zoomAround(next, direction > 0 ? 0.72 : 1.35, el.clientWidth / 2, el.clientHeight / 2));
+		aim(next, RATE.soft);
+		const centerX = layout.width / 2;
+		const centerY = layout.height / 2;
+		const nodeEls = new Map([...world.current.querySelectorAll("[data-node]")].map((item) => [item.dataset.node, item]));
+		const edgeEls = new Map([...world.current.querySelectorAll("[data-edge]")].map((item) => [item.dataset.edge, item]));
+		const nextNodes = new Map();
+		layout.nodes.forEach((node, index) => {
+			const item = nodeEls.get(node.id);
+			nextNodes.set(node.id, { x: node.x, y: node.y });
+			if (!item) return;
+			const old = !moved && placedNodes.current.get(node.id);
+			if (old) {
+				if (old.x !== node.x) move(item, "x", 0, { from: old.x - node.x, rate: RATE.smooth });
+				if (old.y !== node.y) move(item, "y", 0, { from: old.y - node.y, rate: RATE.smooth });
+				return;
+			}
+			const spread = direction < 0 ? -0.18 : 0.22;
+			appear(item, { x: (centerX - node.x - NODE_WIDTH / 2) * spread, y: (centerY - node.y - NODE_HEIGHT / 2) * spread, s: 0.82, wait: Math.min(index * 0.018, 0.24) });
+		});
+		const nextEdges = new Map();
+		layout.edges.forEach((edge, index) => {
+			const item = edgeEls.get(edge.id);
+			nextEdges.set(edge.id, edge.path);
+			if (!item || (!moved && placedEdges.current.get(edge.id) === edge.path)) return;
+			const wait = 0.14 + Math.min(index * 0.014, 0.26);
+			appear(item, { wait });
+			if (edge.kind !== "import" && !["possible", "likely"].includes(edge.confidence)) drawLine(item.querySelector(".gedge-line"), { wait });
+		});
+		placedNodes.current = nextNodes;
+		placedEdges.current = nextEdges;
+		commit();
+	}, [layout]);
 	useEffect(() => {
-		const observer = new ResizeObserver(fit);
+		const observer = new ResizeObserver(() => fit());
 		observer.observe(box.current);
 		return () => observer.disconnect();
 	}, [layout]);
+	useLayoutEffect(() => {
+		control.current = {
+			leave: (id, direction) => {
+				const live = world.current;
+				if (!live || id === view.focus.id || still()) return;
+				const start = { ...camera.current };
+				const node = layout.nodes.find((item) => item.id === id);
+				const pointX = node ? start.x + (node.x + NODE_WIDTH / 2) * start.k : box.current.clientWidth / 2;
+				const pointY = node ? start.y + (node.y + NODE_HEIGHT / 2) * start.k : box.current.clientHeight / 2;
+				const trail = live.cloneNode(true);
+				trail.setAttribute("pointer-events", "none");
+				live.parentNode.append(trail);
+				live.style.visibility = "hidden";
+				clearTimeout(restore.current);
+				restore.current = setTimeout(() => world.current && (world.current.style.visibility = ""), 1500);
+				tween(trail, "zoom", 1, {
+					from: 0,
+					rate: RATE.smooth,
+					eps: 0.012,
+					write: (amount) => {
+						const frame = zoomAround(start, lerp(1, direction > 0 ? 2.5 : 0.55, amount), pointX, pointY);
+						trail.setAttribute("transform", `translate(${frame.x} ${frame.y}) scale(${frame.k})`);
+						trail.style.opacity = String(1 - amount);
+					},
+					done: () => trail.remove(),
+				});
+			},
+		};
+	});
 	const zoomAt = (factor, px, py) => {
-		const { k, x, y } = cameraRef.current;
-		const next = Math.min(fitScale.current * 3.2, Math.max(fitScale.current * 0.4, k * factor));
-		setCamera({ k: next, x: px - ((px - x) / k) * next, y: py - ((py - y) / k) * next });
-		return next;
+		const current = goal.current;
+		const k = Math.min(fitScale.current * 3.2, Math.max(fitScale.current * 0.4, current.k * factor));
+		aim(zoomAround(current, k / current.k, px, py), RATE.quick);
+		return k;
 	};
 	useEffect(() => {
 		const el = box.current;
@@ -124,13 +231,13 @@ function Canvas({ view, filters, selection, onSelect, onOpen, onUp }) {
 	}, [view]);
 	const startPan = (event) => {
 		if (event.button !== 0) return;
-		const origin = { px: event.clientX, py: event.clientY, ...cameraRef.current };
-		const move = (e) => setCamera({ k: origin.k, x: origin.x + e.clientX - origin.px, y: origin.y + e.clientY - origin.py });
+		const origin = { px: event.clientX, py: event.clientY, ...goal.current };
+		const drag = (e) => aim({ k: origin.k, x: origin.x + e.clientX - origin.px, y: origin.y + e.clientY - origin.py }, RATE.snap);
 		const stop = () => {
-			removeEventListener("pointermove", move);
+			removeEventListener("pointermove", drag);
 			removeEventListener("pointerup", stop);
 		};
-		addEventListener("pointermove", move);
+		addEventListener("pointermove", drag);
 		addEventListener("pointerup", stop);
 	};
 	const zoomButton = (factor) => {
@@ -145,7 +252,7 @@ function Canvas({ view, filters, selection, onSelect, onOpen, onUp }) {
 			<defs>
 				${EDGE_KINDS.map(({ kind }) => html`<marker id=${`arrow-${kind}`} class=${`arrow kind-${kind}`} viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" markerUnits="userSpaceOnUse" orient="auto"><path d="M0 0 L8 4 L0 8 z" /></marker>`)}
 			</defs>
-			<g transform=${`translate(${camera.x} ${camera.y}) scale(${camera.k})`}>
+			<g ref=${world}>
 				${layout.edges.map((edge) => html`<${GraphEdge} key=${edge.id} edge=${edge} selected=${selection?.id === edge.id} dimmed=${!edgeOn(edge)} showLabel=${layout.edges.length <= 12 || edgeOn(edge) && Boolean(selection)} onSelect=${(id) => onSelect({ type: "edge", id })} />`)}
 				${layout.nodes.map((node) => html`<${GraphNode} key=${node.id} node=${node} selected=${selection?.id === node.id} dimmed=${related ? !related.has(node.id) : false} onSelect=${(id) => onSelect({ type: "node", id })} onOpen=${onOpen} />`)}
 			</g>
@@ -154,7 +261,7 @@ function Canvas({ view, filters, selection, onSelect, onOpen, onUp }) {
 		<div class="graph-zoom" onClick=${(e) => e.stopPropagation()} onPointerDown=${(e) => e.stopPropagation()}>
 			<button class="btn sm icon" title="Zoom in" aria-label="Zoom in" onClick=${() => zoomButton(1.25)}>+</button>
 			<button class="btn sm icon" title="Zoom out" aria-label="Zoom out" onClick=${() => zoomButton(0.8)}>−</button>
-			<button class="btn sm" title="Fit to screen (f)" onClick=${fit}>Fit</button>
+			<button class="btn sm" title="Fit to screen (f)" onClick=${() => fit()}>Fit</button>
 		</div>
 		<div class="graph-help tiny faint">Scroll into a box to zoom through it · scroll out to go up · double-click to open</div>
 	</div>`;
@@ -325,7 +432,7 @@ function RepoList() {
 
 function Inspector({ view, selection, onSelect, onOpen, onShowDiagram }) {
 	const edge = selection?.type === "edge" ? view.edges.find((item) => item.id === selection.id) : null;
-	if (edge) return html`<aside class="card graph-inspector"><${EdgeInspector} edge=${edge} view=${view} onBack=${() => onSelect(null)} /></aside>`;
+	if (edge) return html`<aside class="card graph-inspector"><${EdgeInspector} key=${edge.id} edge=${edge} view=${view} onBack=${() => onSelect(null)} /></aside>`;
 	const node = (selection?.type === "node" && view.nodes.find((item) => item.id === selection.id)) || view.focus;
 	const isFocus = node.id === view.focus.id;
 	const edges = view.edges.filter((item) => isFocus || item.from === node.id || item.to === node.id);
@@ -342,7 +449,7 @@ function Inspector({ view, selection, onSelect, onOpen, onShowDiagram }) {
 		toast({ kind: "done", tone: "ok", title: "Mermaid copied" });
 	};
 	return html`<aside class="card graph-inspector">
-		<div class="inspector-body">
+		<div class="inspector-body" key=${node.id}>
 			<div class="row wrap"><span class="pill">${KIND_LABEL[node.kind] ?? node.kind}</span>${node.ghost ? html`<span class="pill">outside this level</span>` : null}</div>
 			<h3 class="inspect-title">${node.label}</h3>
 			${node.path ? html`<div class="mono tiny faint ellipsis" title=${node.path}>${node.path}${node.line ? `:${node.line}` : ""}</div>` : null}
@@ -388,10 +495,16 @@ export function GraphView({ focus }) {
 		};
 	}, [focusId, revision]);
 	const filters = useMemo(() => new Set(EDGE_KINDS.map((k) => k.kind).filter((kind) => !hiddenKinds.has(kind))), [hiddenKinds]);
-	const open = (id) => navigate(graphHref(id));
+	const canvas = useRef(null);
+	const open = (id) => {
+		canvas.current?.leave(id, 1);
+		navigate(graphHref(id));
+	};
 	const goUp = () => {
 		const crumbs = view?.crumbs ?? [];
-		if (crumbs.length > 1) open(crumbs.at(-2).id);
+		if (crumbs.length < 2) return;
+		canvas.current?.leave(crumbs.at(-2).id, -1);
+		navigate(graphHref(crumbs.at(-2).id));
 	};
 	useEffect(() => {
 		const onKey = (e) => {
@@ -436,7 +549,7 @@ export function GraphView({ focus }) {
 					</div>
 					<div class="graph-body">
 						<div class="card graph-card">
-							<${Canvas} view=${view} filters=${filters} selection=${selection} onSelect=${setSelection} onOpen=${open} onUp=${goUp} />
+							<${Canvas} view=${view} filters=${filters} selection=${selection} onSelect=${setSelection} onOpen=${open} onUp=${goUp} control=${canvas} />
 						</div>
 						<${Inspector} view=${view} selection=${selection} onSelect=${setSelection} onOpen=${open} onShowDiagram=${() => setDiagram(true)} />
 					</div>`
